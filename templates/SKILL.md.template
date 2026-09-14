@@ -1,0 +1,25 @@
+---
+name: replace-with-skill-name
+description: "REPLACE: Describe what this skill does and the requests that should trigger it."
+---
+
+# REPLACE: Skill title
+
+REPLACE: State the intended outcome and any essential context specific to your workflow.
+
+## Instructions
+
+REPLACE: Describe the decisions, preferences, and steps needed to produce the result. Include only guidance that improves the agent's work on this task.
+
+## Verification
+
+REPLACE: Describe how to recognize a successful result and any checks the task needs.
+
+<!-- Remove this comment when finished. Add optional supporting resources only
+when useful. Link each resource with a relative path and explain when to read
+or use it. Replace every REPLACE marker and the frontmatter name.
+For shell commands, provide labeled Windows PowerShell 5.1 and Linux Bash
+variants. Identical commands may share a block labeled "PowerShell and Bash".
+Quote paths and state the working directory and prerequisites. Keep failure
+handling equivalent. State platform-specific limitations and provide an
+alternative where available. -->
