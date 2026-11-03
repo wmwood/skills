@@ -19,6 +19,13 @@ AGENTS.md                 # Guidance for agents working in this repository
 
 Keep each skill in its own folder. Add optional folders only when they have a purpose. Use lowercase, hyphenated names such as `meeting-notes` or `review-sql`; match the folder name to the frontmatter `name`.
 
+## Available skills
+
+- [feature-planner](skills/feature-planner/SKILL.md): Interview through design decisions, confirm shared understanding, and produce an implementation plan for review.
+- [ticket-writer](skills/ticket-writer/SKILL.md): Interview through the intended change, check affected projects and potential conflicts, and produce confirmed ticket bullets for a coworker.
+
+Both skills require Plan mode. `ticket-writer` reuses the `feature-planner` interview and ends with ticket content in chat.
+
 ## Add a skill
 
 Run one of the following examples from this repository's root. Both create a new skill folder and copy the template; if the folder already exists, they stop without overwriting its contents.
@@ -66,6 +73,8 @@ Whenever documentation includes shell commands, provide labeled Windows PowerShe
 This repository stores the source files. To make a skill available in an AI tool, follow that tool's discovery or installation rules and point it to, link, or copy the **whole skill folder**, including supporting files. Discovery paths and supported metadata vary by tool; storing files here alone does not install them globally.
 
 Make ongoing edits here so this repository stays the source of truth. If you use copies, refresh them after changes.
+
+The [ticket-writer](skills/ticket-writer/SKILL.md) skill depends on [feature-planner](skills/feature-planner/SKILL.md). When installing `ticket-writer`, copy both skill folders into the same skills directory so the relative dependency link resolves.
 
 ### Copy a skill into your user-wide directory
 
