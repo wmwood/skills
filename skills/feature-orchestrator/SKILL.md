@@ -1,0 +1,28 @@
+---
+name: feature-orchestrator
+description: Execute an approved feature plan by coordinating isolated agents, reviewed squash integration, recovery, feature gates and authorized draft PR publication.
+---
+
+# Feature Orchestrator
+
+## Activation and inputs
+Use when the user authorizes executing or resuming a planned feature. Inputs: external workspace, approved latest specification, task plan, repository and execution authority. Read the [shared contract](../feature-workflow/references/contracts.md), [operations](../feature-workflow/references/operations.md), and [helper request interface](../feature-workflow/references/cli.md). Verify helper operations through CLI help before invoking them.
+
+## Authority
+You are the sole canonical state writer after planning, sole task-branch integrator and sole actor marking tasks complete. Delegate implementation and independent review; do not certify your own implementation. Humans retain product decisions, PR approval and explicit cleanup authority. Do not modify the original checkout or approve/merge a PR.
+
+## Procedure
+1. Verify contract/library compatibility, latest spec approval/digest, workspace identity, actual worktree/branch/HEAD evidence and current checkpoints. Serialize canonical writes and integration with the workspace lock. Reject competing writers; distinguish stale locks through objective owner/session evidence.
+2. Dispatch ready tasks only after dependencies complete. Create each task worktree from the latest integrated feature commit, using `codex/<feature>-task-<id>` branches, then send the context packet in shared operations. Run independent tasks concurrently only with nonoverlapping ownership. Agents write distinct reports; you record lifecycle transitions and checkpoint dispatches.
+3. On task submission verify actual commit, diff, tests and scope. Assign a different agent to [independent review](../independent-code-reviewer/SKILL.md). Require approval tied to exact task HEAD and current spec revision. Rejected work returns for repair, new commit and fresh independent review; an agent's success message is insufficient. You alone submit reports into canonical state through helper operations.
+4. Serialize integration. Verify clean managed feature tree, branch and expected HEAD, task base ancestry, complete dependencies and current review. Checkpoint intent before squash merging. Run task checks against the squashed integrated tree before committing; create one squash commit with feature/task/source-head/spec evidence, then verify commit/tree evidence and atomically record completion. Conflicts or failed checks block completion. Preserve ambiguous commits for investigation; never blindly reset or repeat integration.
+5. For requested requirements changes, preserve the original ticket. Investigate impact, present a full consolidated revised specification and obtain explicit human approval of that revision/digest. Append decision evidence, increment revision, invalidate both gates, reassess affected task scopes/reviews/completion and plan follow-up tasks. Do not silently weaken requirements or overwrite history.
+6. After all tasks complete, commission [feature validation](../feature-validator/SKILL.md) and the mandatory [quality gate](../pre-pr-quality-gate/SKILL.md) on the exact integrated HEAD/latest spec. Route findings to scoped repair tasks with independent review and integration; repeat invalidated gates. Missing required checks or unresolved blocking findings prevent publication.
+7. With all gates current and publication authorized, prepare `pr.md`, check for an existing matching PR, publish a draft PR and record URL/head/base. Keep it draft; humans approve it. Treat PR feedback as scoped follow-up tasks and repeat review, integration, validation and quality gates before publishing updates.
+8. Record publication with `record-pr`; keep lifecycle published until inspected provider evidence and a locally fetched merge commit verify the published PR was merged into its base. Never merge the PR yourself. Read the [cleanup protocol](../feature-workflow/references/cleanup.md). Record resources as created, including worker/reviewer resources. After reviewed integration and durable report preservation, plan incremental task/review cleanup. Present the concrete inventory/digest and obtain matching human authorization before `cleanup-apply`. Resume partial failures with the same inventory; report blocked items. After verified PR merge, separately inventory and authorize feature worktree/branch removal. Run `cleanup-status` and report removed, retained and blocked resources plus recovery refs. Closed requires merged evidence and all registered resources removed; retained/blocked resources leave closeout pending.
+
+## Outputs and completion
+Current canonical state, append-only decisions/checkpoints, independently reviewed squash commits, exact-HEAD gate reports and an authorized draft PR URL (or explicit publishing blocker). Distinguish published, merged, cleanup pending and closed; publication never implies cleanup completion.
+
+## Failure and recovery
+Checkpoint interruptions and preserve task work. Reconstruct status from Git log/tree/status/worktree evidence and checkpoints. Distinguish no mutation, prepared squash, committed-but-unsaved and recorded completion; reconcile only a uniquely matching commit with parent, trailers, tree and validation evidence. Otherwise investigate before retrying. Retry once only for an understood transient fault. Missing tools or auth leave reviewable local artifacts and an explicit blocker; never claim publication. Technical investigation stays with agents; only product or authority questions go to humans.
