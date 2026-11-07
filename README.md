@@ -6,8 +6,8 @@ A working MVP for agent-driven feature development. Agents investigate technical
 
 | Skill | Responsibility |
 | --- | --- |
-| [ticket-writer](skills/ticket-writer/SKILL.md) | Interview and inspect; produce one comprehensive approved ticket. |
-| [feature-planner](skills/feature-planner/SKILL.md) | Verify initialization, isolate the feature and decompose approved scope. |
+| [ticket-writer](skills/ticket-writer/SKILL.md) | Optional utility: investigate/interview and produce one approved ticket. |
+| [feature-planner](skills/feature-planner/SKILL.md) | Interview unstructured scope or reuse an approved ticket; initialize and plan. |
 | [feature-orchestrator](skills/feature-orchestrator/SKILL.md) | Dispatch, recover, serialize reviewed squash integrations and own state. |
 | [feature-implementer](skills/feature-implementer/SKILL.md) | Implement and test one scoped task in its own worktree. |
 | [independent-code-reviewer](skills/independent-code-reviewer/SKILL.md) | Review actual commits independently of the author. |
@@ -21,7 +21,17 @@ A working MVP for agent-driven feature development. Agents investigate technical
 
 Read [installation and invocation](docs/installation.md), [shared contracts](skills/feature-workflow/references/contracts.md), and [MVP limitations](docs/limitations.md). Install the entire sibling library; individual process skills depend on shared resources. This repository remains the source of truth; nothing installs or updates automatically.
 
-Use `$repository-initializer` for an uninitialized repository, then `$ticket-writer`, `$feature-planner`, and `$feature-orchestrator`. The Orchestrator dispatches independent implementers/reviewers and runs mandatory validation and quality gates. Initial ticket and subsequent consolidated specifications require human approval. Draft PR creation follows passing gates; cleanup requires separate explicit authorization bound to a concrete resource inventory. Publication, verified merge, cleanup pending and closed are distinct states. Task/review resources can be released after integration; feature resources require verified PR merge. See the [cleanup protocol](skills/feature-workflow/references/cleanup.md).
+Use `$repository-initializer` for an uninitialized repository, then `$feature-planner` and `$feature-orchestrator`. Planner accepts an unstructured request: it investigates, interviews and obtains explicit scope approval before producing tasks. `$ticket-writer` is an optional utility for preparing a comprehensive approved ticket; Planner reuses valid approved scope without a redundant interview. The Orchestrator dispatches independent implementers/reviewers and runs mandatory validation and quality gates. Initial ticket and subsequent consolidated specifications require human approval. Draft PR creation follows passing gates; cleanup requires separate explicit authorization bound to a concrete resource inventory. Publication, verified merge, cleanup pending and closed are distinct states. Task/review worktrees can be released after integration; feature worktree/branch removal requires verified PR merge. See the [cleanup protocol](skills/feature-workflow/references/cleanup.md).
+
+## Read-only dashboard snapshots
+
+A separate local dashboard can consume the [versioned JSON snapshot](skills/feature-workflow/references/snapshot.md) across explicitly configured repositories and external workspace locations. The application and live agent/provider integrations remain outside this library.
+
+Initial interviews and drafts stay private. A new feature appears after approved ticket/task production and explicit visibility publication; subsequent investigation and approval waits remain visible. Existing verified approved/planned schema 2 work remains readable without rerunning Planner.
+
+The reader separates lifecycle and phases, dependency readiness, blockers, human feedback, assignments, activity freshness and evidence currency. Task status never proves an agent is running. Unknown or stale information stays explicit. Reading does not acquire writer locks, update state, run tests, poll services or clean resources.
+
+See [consumer setup and exit-code handling](docs/installation.md#consume-snapshots-from-a-separate-dashboard). Use the documented cache-free bootstrap before callable imports; the direct CLI handles its own sibling-module cache prevention. Writer operations such as cleanup-status remain transactional and are not dashboard read APIs.
 
 ## Validate
 
@@ -47,7 +57,7 @@ python 'scripts/validate_library.py' &&
 
 Tests verify protocol and Git safety. They complement independent agent review; they do not establish product correctness for future features.
 
-See [representative scenarios](docs/scenarios.md) and the [verification results](docs/verification.md) for coverage and remaining manual checks.
+See [representative scenarios](docs/scenarios.md) and the [verification conventions](docs/verification.md) for coverage and remaining manual checks.
 
 ## Maintain
 
