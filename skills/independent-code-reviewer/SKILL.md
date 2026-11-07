@@ -24,5 +24,8 @@ An independent exact-commit review report, with approval, rejection or blocked v
 ## Failure and recovery
 If HEAD/spec changes during review, discard the verdict for integration purposes and restart against a stable target. If code/tests or required evidence are inaccessible, report the gap and withhold approval. Preserve reports across interruptions; never fabricate check results or fix code while certifying it.
 
+## Visibility reporting
+When reporting progress, interruption or blocked review, include actual reported activity/time, known chat references, the blocker and what would resolve it, and any human question with its relevant artifact and affected work; follow the [recording shapes](../feature-workflow/references/snapshot.md#recording-extension). Return these observations to Orchestrator without canonical writes or inferred agent liveness. A feedback answer does not replace exact-commit review evidence.
+
 ## Resource handoff
 Report every created worktree/branch, temporary directory and full container/network ID with owner, purpose, exact path, source HEAD and task ID immediately to Orchestrator for the feature manifest. Include resources and unrecorded creation attempts in interruption reports. Supply durable report paths and retention needs before releasing a worktree; only Orchestrator performs explicitly authorized cleanup under the [cleanup protocol](../feature-workflow/references/cleanup.md). Keep application/shared resource ownership explicit.

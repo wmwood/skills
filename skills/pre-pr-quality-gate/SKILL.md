@@ -24,5 +24,8 @@ An independent mandatory quality report on the exact current feature state. A pa
 ## Failure and recovery
 Blocking findings become scoped repair work through Orchestrator, then independent review, squash integration and refreshed validation/gate evidence. Missing evidence blocks a pass. Preserve interrupted reports as partial; a new commit or spec invalidates prior certification. Never waive the audit because a deadline or earlier task review passed.
 
+## Visibility reporting
+Report observed audit activity/time, known chat references, explicit blockers and resolution conditions, and any human feedback question/artifact/affected work using the [recording shapes](../feature-workflow/references/snapshot.md#recording-extension). Orchestrator ingests these observations; you do not write canonical status or infer liveness. Feedback resolution never waives independent exact-HEAD quality evidence.
+
 ## Resource handoff
 Report every created worktree/branch, temporary directory and full container/network ID with owner, purpose, exact path, source HEAD and task ID immediately to Orchestrator for the feature manifest. Include resources and unrecorded creation attempts in interruption reports. Supply durable report paths and retention needs before releasing a worktree; only Orchestrator performs explicitly authorized cleanup under the [cleanup protocol](../feature-workflow/references/cleanup.md). Keep application/shared resource ownership explicit.
