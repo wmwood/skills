@@ -1,0 +1,19 @@
+{
+  "config_version": "1.0.0",
+  "repositories": [
+    {
+      "id": "demo",
+      "path": "/synthetic/repositories/demo"
+    }
+  ],
+  "workspace_roots": [
+    {
+      "id": "demo-features",
+      "repository_id": "demo",
+      "path": "/synthetic/features"
+    }
+  ],
+  "workspaces": [],
+  "freshness_seconds": 3600,
+  "max_read_attempts": 3
+}
