@@ -6,7 +6,7 @@ Library version: 1.1.0. State schema: 2. Skills install as sibling directories, 
 
 - Human: product/business intent, approval of initial ticket and each requirements revision, PR approval, explicit cleanup authorization.
 - Ticket Writer: investigate and interview, produce one comprehensive ticket; never task decomposition or implementation.
-- Planner: verify initialization, create external feature state and feature worktree, decompose approved scope; no integration or task completion.
+- Planner: investigate/interview unstructured requests or reuse an approved ticket, obtain exact-scope approval, verify initialization, create external feature state and feature worktree, and decompose approved scope; no integration or task completion. Ticket Writer is optional.
 - Orchestrator: sole writer of canonical state after planning, sole integrator and task completer; serializes mutations. Agents write separate reports, never concurrently edit state.
 - Implementer: one task branch/worktree; no canonical state writes, integration, or self-review.
 - Reviewer: different agent from author; read-only code review tied to exact commit and spec revision.
@@ -43,5 +43,3 @@ Schema 2 adds `lifecycle`, `merge`, `resources`, and `cleanup`. `resources` is t
 ## Compatibility
 
 Manual releases include all sibling skills and a manifest with library/schema version and content hashes. During manual update compare old/new manifests, detect missing/mixed resources and schema/authority changes, inventory active workspaces from user-provided locations (no global scanning), checkpoint first, and propose instruction-only changes in isolated worktrees. Unknown major/schema versions block resumption. Never rewrite ticket/history or infer product approval. Preserve backups and rollback instructions; do not resume agents until the single Orchestrator reconciles compatibility.
-
-

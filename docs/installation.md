@@ -31,14 +31,14 @@ For project installation, use an absolute destination ending in the existing pro
 
 ## Invoke in chat
 
-1. `$repository-initializer`: inspect this repository and propose AGENTS.md/GLOSSARY.md initialization in an isolated worktree.
-2. `$ticket-writer`: investigate my feature and interview me about unresolved product decisions; produce one comprehensive ticket.
-3. Approve the exact ticket; `$feature-planner`: plan this approved ticket with an external feature workspace.
-4. `$feature-orchestrator`: execute the approved plan with independent implementers/reviewers, serial integration, validation and a draft PR after all gates pass.
-5. Give PR feedback to the same Orchestrator for scoped fixes and renewed review/gates.
-6. For cleanup, inspect the concrete inventory and explicitly authorize named artifacts. Remove task/review resources incrementally only after integration; remove feature branch/worktree only after verified PR merge. Approval must match the cleanup inventory digest.
+1. Use $repository-initializer when repository instructions/glossary are missing; retain its reviewed committed baseline.
+2. Give $feature-planner an unstructured request or a prepared approved ticket. Planner investigates and interviews unresolved scope before approval. $ticket-writer is an optional utility for preparing one comprehensive ticket.
+3. Approve the exact scope before Planner produces tasks. Valid approved scope is reused without a redundant interview or approval unless it changes. Planning does not authorize implementation dispatch.
+4. Invoke $feature-orchestrator to execute the approved plan with independent implementers/reviewers, serial integration and exact-HEAD validation/quality gates. Draft PR publication also requires publishing authorization; agents never approve or merge it.
+5. Return PR feedback to Orchestrator for scoped fixes, reviewed integration and renewed gates. Product changes require an approved consolidated specification revision.
+6. For cleanup, inspect and explicitly authorize the concrete inventory digest. Task/review resources may be released after reviewed integration; feature worktree/branch removal additionally requires verified PR merge.
 
-These are chat instructions, not shell commands. Loading skills does not require Plan mode; respect the active environment's execution restrictions. In a read-only/Plan session prepare reviewable work and defer mutations until execution is permitted. Product approval is separate from mode selection. Missing independent agents blocks dispatch rather than permitting self-review.
+These are chat instructions, not shell commands. Product approval is separate from agent mode and execution authorization. In read-only environments prepare reviewable artifacts and defer mutations. Missing independent agents blocks dispatch rather than permitting self-review.
 
 ## Prepare a release manually
 
