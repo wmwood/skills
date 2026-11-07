@@ -192,6 +192,32 @@ class DashboardAcceptanceTests(unittest.TestCase):
                     self.assertEqual("complete", snapshot["completeness"])
                 self.assertEqual(before, fingerprint(workspace))
 
+    def test_terminal_proof_repros_preserve_facts_and_cannot_clear_affected_work(self):
+        cases = {c["id"]: c for c in CATALOG["cases"]}
+        for identity in ("unproven-resolved-blocker", "unproven-withdrawn-feedback",
+                         "unavailable-blocker-resolution", "uri-resolved-blocker",
+                         "nonblocking-unproven-withdrawal", "resolved-blocker",
+                         "feedback-resolved", "feedback-withdrawn", "feedback-reopened"):
+            with self.subTest(case=identity):
+                self.config["workspaces"] = []
+                case = cases[identity]
+                workspace = self.fixture(case, name="terminal " + identity)
+                before = fingerprint(workspace)
+                with patch("socket.socket", side_effect=AssertionError("URI metadata is never fetched")), \
+                        patch("subprocess.run", side_effect=AssertionError("reader must not run commands")):
+                    snapshot = self.snapshot()
+                self.assert_expected(snapshot, case["expected"])
+                feature = snapshot["features"][0]
+                self.assertEqual("ready", feature["tasks"][0]["readiness"]["dependencies"])
+                for kind in ("blockers", "feedback"):
+                    for record in feature[kind]:
+                        local = record["blocker_id" if kind == "blockers" else "feedback_id"]
+                        source = self.state(workspace)["visibility"][kind][local]
+                        self.assertEqual(source["status"], record["status"])
+                        self.assertEqual(source["reason" if kind == "blockers" else "question"],
+                                         record["reason" if kind == "blockers" else "question"])
+                self.assertEqual(before, fingerprint(workspace))
+
     def test_catalog_and_manual_boundaries_cover_every_acceptance_id(self):
         criteria = {"DV-%02d" % i for i in range(1, 16)}
         seen = set()

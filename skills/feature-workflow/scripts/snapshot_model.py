@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 import re
 import hashlib
 import json
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 _IDENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
@@ -84,6 +84,7 @@ class _Projection:
         self.known_artifacts = {}
         self.collision_ids = set()
         self.partial = False
+        self.unknown_prerequisites = []
 
     def diag(self, code, message, entity=None):
         self.diagnostics.append(dict(code=code, message=message,
@@ -342,14 +343,84 @@ class _Projection:
         out["artifacts"] = self.artifact_list(value.get("artifacts"), path + ".artifacts")
         return out
 
+    def unknown_prerequisite(self, kind, value=None):
+        if kind not in {"blockers", "feedback"}:
+            return
+        if kind == "feedback" and isinstance(value, dict) and value.get("blocking") is False:
+            return
+        targets = value.get("blocks") if isinstance(value, dict) else None
+        if not isinstance(targets, list) or not all(_text(t) for t in targets):
+            targets = None
+        elif kind == "feedback" and not targets:
+            targets = None
+        self.unknown_prerequisites.append(targets)
+
+    def resolution_references(self, raw, projected, *, required, local_availability):
+        if not isinstance(raw, list):
+            return "not_recorded" if raw is None else "invalid"
+        if (required and not raw) or len(raw) != len(projected):
+            return "invalid"
+        for ref in raw:
+            if (not isinstance(ref, dict) or not _member(ref.get("kind"), {"file", "uri"})
+                    or not _text(ref.get("target"))
+                    or (ref.get("sha256") is not None and not _digest(ref["sha256"]))
+                    or (ref.get("revision") is not None and not _positive(ref["revision"]))
+                    or ("artifact_id" in ref and (not isinstance(ref["artifact_id"], str)
+                        or not _IDENT.fullmatch(ref["artifact_id"])))):
+                return "invalid"
+            if ref["kind"] == "uri":
+                try:
+                    valid_uri = ref.get("base") is None and bool(urlparse(ref["target"]).scheme)
+                except ValueError:
+                    valid_uri = False
+                if not valid_uri:
+                    return "invalid"
+                # The writer accepts a recorded URI, not fetched remote proof.
+                continue
+            if local_availability:
+                available = self.availability(ref["target"])
+                if available["status"] != "available":
+                    return available["reason"] or "not_recorded"
+        return None
+
+    def terminal_proof(self, kind, raw, out):
+        timestamp = _time(out.get("resolved_at"))
+        history = raw.get("history")
+        last = history[-1] if isinstance(history, list) and history else None
+        if (timestamp is None or not isinstance(last, dict)
+                or last.get("status") != raw["status"] or not _text(last.get("by"))
+                or _time(last.get("recorded_at")) != timestamp):
+            return "invalid"
+        if "artifacts" in last and not isinstance(last["artifacts"], list):
+            return "invalid"
+        projected_last = out["history"][-1] if out["history"] else None
+        if projected_last is None:
+            return "invalid"
+        history_gap = self.resolution_references(last.get("artifacts", []),
+                         projected_last["artifacts"], required=kind == "blockers",
+                         local_availability=kind == "blockers")
+        if history_gap:
+            return history_gap
+        if kind == "blockers":
+            return self.resolution_references(raw.get("artifacts"), out["artifacts"],
+                                               required=True, local_availability=True)
+        response = raw.get("disposition")
+        disposition = out["disposition"]
+        if disposition is None or _time(disposition.get("recorded_at")) is None:
+            return "invalid"
+        return self.resolution_references(response.get("artifacts", []), disposition["artifacts"],
+                                           required=False, local_availability=False)
+
     def entities(self, visibility, kind):
         raw = visibility.get(kind)
         if raw is None:
             self.absent(kind)
+            self.unknown_prerequisite(kind)
             return []
         if not isinstance(raw, dict):
             self.diag("INVALID_METADATA", "Expected map at " + kind)
             self.absent(kind, "invalid")
+            self.unknown_prerequisite(kind)
             return []
         singular = {"blockers": "blocker", "feedback": "feedback", "assignments": "assignment"}[kind]
         result = []
@@ -358,6 +429,7 @@ class _Projection:
             if not _text(key) or not isinstance(value, dict):
                 self.diag("INVALID_METADATA", "Invalid entity at " + path)
                 self.absent(path, "invalid")
+                self.unknown_prerequisite(kind, value)
                 continue
             out = deepcopy(value)
             out.update(id=self.id + "/" + singular + "/" + quote(key, safe=""), **{singular + "_id": key})
@@ -392,12 +464,14 @@ class _Projection:
                     self.diag("UNKNOWN_STATUS" if not _member(value.get("status"), statuses) else "INVALID_METADATA",
                               "Invalid " + singular + " record at " + path)
                     self.absent(path, "invalid")
+                    self.unknown_prerequisite(kind, value)
                     continue
                 if (not isinstance(value.get("blocks"), list)
                         or not all(_text(t) for t in value["blocks"])
                         or (kind == "feedback" and type(value.get("blocking")) is not bool)):
                     self.diag("INVALID_METADATA", "Invalid blocking targets at " + path)
                     self.absent(path, "invalid")
+                    self.unknown_prerequisite(kind, value)
                     continue
                 out["blocks"] = sorted(set(value["blocks"]))
                 nullable = "responsible" if kind == "blockers" else "respondent"
@@ -409,7 +483,6 @@ class _Projection:
                 out["history"] = self.history(value.get("history"), path + ".history")
                 if kind == "blockers":
                     out["artifacts"] = self.artifact_list(value.get("artifacts"), path + ".artifacts")
-                    resolution_valid = bool(out["resolved_at"] and any(h["status"] == "resolved" and h.get("by") and h.get("recorded_at") for h in out["history"]))
                 else:
                     out["artifact"] = self.artifact(value.get("artifact"), path + ".artifact")
                     out["answer"] = self.answer(value.get("answer"), path + ".answer")
@@ -417,11 +490,14 @@ class _Projection:
                     for field in ("answer", "disposition"):
                         if out[field] is None:
                             self.absent(path + "." + field, "not_applicable")
-                    resolution_valid = bool(out["resolved_at"] and out["disposition"] and out["disposition"]["recorded_at"])
-                if value["status"] == "resolved" and not resolution_valid:
-                    self.diag("INVALID_METADATA", "Resolved record lacks resolution evidence at " + path)
-                    self.absent(path, "invalid")
-                    continue
+                terminal = value["status"] == "resolved" or kind == "feedback" and value["status"] == "withdrawn"
+                if terminal:
+                    proof_gap = self.terminal_proof(kind, value, out)
+                    if proof_gap:
+                        self.diag("INVALID_METADATA", "Reported terminal status has unverified resolution/disposition proof at " + path)
+                        self.absent(path, proof_gap)
+                        self.absent(path + ".status", proof_gap)
+                        self.unknown_prerequisite(kind, value)
             result.append(out)
         return sorted(result, key=lambda v: v["id"])
 
@@ -783,9 +859,8 @@ def project_feature(state, *, repository_id, workspace_id, source_id, now,
             blocked = any(b["status"] == "open" and targets.intersection(b["blocks"]) for b in blockers)
             feedback_wait = any(f["blocking"] and f["status"] in {"open", "answered"}
                                 and targets.intersection(f["blocks"]) for f in feedback)
-            uncertain = any(k in {"blockers", "feedback"} or
-                            (r in _GAPS and (k.startswith("blockers.") or k.startswith("feedback.")))
-                            for k, r in p.unavailable.items())
+            uncertain = any(scope is None or targets.intersection(scope)
+                            for scope in p.unknown_prerequisites)
             if blocked or feedback_wait or state.get("integration") is not None:
                 reasons += (["explicit_blocker"] if blocked else []) + (["human_feedback"] if feedback_wait else [])
                 if state.get("integration") is not None:

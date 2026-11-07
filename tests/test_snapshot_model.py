@@ -75,6 +75,24 @@ def feedback(status="open"):
                 disposition=None, history=[])
 
 
+def resolved_blocker(references):
+    value = blocker("resolved")
+    value.update(resolved_at="2026-11-06T19:40:00Z", artifacts=deepcopy(references),
+                 history=[dict(status="resolved", by="orchestrator",
+                               recorded_at="2026-11-06T19:40:00Z", artifacts=deepcopy(references))])
+    return value
+
+
+def terminal_feedback(status="withdrawn"):
+    value = feedback(status)
+    value.update(resolved_at="2026-11-06T19:40:00Z",
+                 disposition=dict(text="Owner disposition recorded", by="owner",
+                                  recorded_at="2026-11-06T19:30:00Z", artifacts=[]),
+                 history=[dict(status=status, by="orchestrator",
+                               recorded_at="2026-11-06T19:40:00Z", artifacts=[])])
+    return value
+
+
 class SnapshotModelTests(unittest.TestCase):
     def test_projection_is_pure_and_deterministic_with_no_io(self):
         value = state()
@@ -225,9 +243,11 @@ class SnapshotModelTests(unittest.TestCase):
         self.assertEqual("ready", feature["tasks"][0]["readiness"]["dependencies"])
         value["visibility"]["blockers"]["configuration"]["blocks"] = ["task:other"]
         self.assertTrue(project(value)[0]["tasks"][0]["readiness"]["start_eligible"])
+        value["visibility"]["blockers"]["configuration"]["blocks"] = ["task:first"]
         value["visibility"]["blockers"]["configuration"]["status"] = "resolved"
         feature, diagnostics = project(value)
-        self.assertEqual([], feature["blockers"])
+        self.assertEqual("resolved", feature["blockers"][0]["status"])
+        self.assertIn("blockers.configuration.status", feature["unavailable"])
         self.assertIsNone(feature["tasks"][0]["readiness"]["start_eligible"])
         self.assertIn("INVALID_METADATA", [d["code"] for d in diagnostics])
 
@@ -247,6 +267,8 @@ class SnapshotModelTests(unittest.TestCase):
         question["resolved_at"] = "2026-11-06T19:40:00Z"
         question["disposition"] = dict(text="Recorded", by="orchestrator",
                                        recorded_at="2026-11-06T19:40:00Z", artifacts=[])
+        question["history"].append(dict(status="resolved", by="orchestrator",
+                                         recorded_at=question["resolved_at"], artifacts=[]))
         feature, _ = project(value)
         self.assertTrue(feature["tasks"][0]["readiness"]["start_eligible"])
 
@@ -673,6 +695,108 @@ class SnapshotModelTests(unittest.TestCase):
         self.assertEqual("current", feature["integration"]["currency"])
         self.assertNotIn("integrating", feature["phases"])
         self.assertEqual(completed, feature["integration"]["record"]["completed"]["first"])
+
+    def test_unproven_terminal_status_preserves_facts_without_clearing_prerequisites(self):
+        values = []
+        unproven = resolved_blocker([])
+        value = state()
+        value["visibility"]["blockers"] = {"resolution": unproven}
+        values.append((value, "blockers", "resolution", "reason"))
+        value = state()
+        value["visibility"]["feedback"] = {"choice": feedback("withdrawn")}
+        values.append((value, "feedback", "choice", "question"))
+        for value, kind, local_id, fact in values:
+            with self.subTest(kind=kind):
+                original = deepcopy(value)
+                feature, diagnostics = project(value)
+                self.assertEqual(original["visibility"][kind][local_id]["status"],
+                                 feature[kind][0]["status"])
+                self.assertEqual(original["visibility"][kind][local_id][fact], feature[kind][0][fact])
+                self.assertEqual("invalid", feature["unavailable"][kind + "." + local_id + ".status"])
+                self.assertEqual("ready", feature["tasks"][0]["readiness"]["dependencies"])
+                self.assertIsNone(feature["tasks"][0]["readiness"]["start_eligible"])
+                self.assertTrue(diagnostics)
+                self.assertEqual(original, value)
+
+    def test_blocker_resolution_requires_local_proof_or_typed_uri_metadata(self):
+        value = state()
+        value["visibility"]["blockers"] = {"resolution": resolved_blocker([ref("resolution.json")])}
+        feature, _ = project(value)
+        self.assertIsNone(feature["tasks"][0]["readiness"]["start_eligible"])
+        feature, _ = project(value, artifact_status=statuses(**{"resolution.json": AVAILABLE}))
+        self.assertTrue(feature["tasks"][0]["readiness"]["start_eligible"])
+        self.assertNotIn("blockers.resolution.status", feature["unavailable"])
+        uri = dict(kind="uri", target="https://example.invalid/resolution", base=None,
+                   sha256=None, revision=None)
+        value["visibility"]["blockers"]["resolution"] = resolved_blocker([uri])
+        with patch("socket.socket", side_effect=AssertionError("no remote fetch")):
+            feature, _ = project(value)
+        self.assertTrue(feature["tasks"][0]["readiness"]["start_eligible"])
+        self.assertEqual("not_recorded", feature["blockers"][0]["artifacts"][0]["availability"]["reason"])
+
+    def test_feedback_terminal_disposition_allows_empty_attachments_and_reopen(self):
+        for status in ("resolved", "withdrawn"):
+            value = state()
+            question = terminal_feedback(status)
+            value["visibility"]["feedback"] = {"choice": question}
+            feature, _ = project(value)
+            self.assertTrue(feature["tasks"][0]["readiness"]["start_eligible"])
+            self.assertEqual([], feature["feedback"][0]["disposition"]["artifacts"])
+            self.assertNotIn("feedback.choice.status", feature["unavailable"])
+            previous = deepcopy(question["disposition"])
+            question.update(status="open", resolved_at=None, disposition=None)
+            question["history"].append(dict(status="open", by="orchestrator", recorded_at=NOW,
+                                            artifacts=[], previous_disposition=previous))
+            feature, _ = project(value)
+            self.assertFalse(feature["tasks"][0]["readiness"]["start_eligible"])
+            self.assertEqual(previous, feature["feedback"][0]["history"][-1]["previous_disposition"])
+
+    def test_terminal_history_and_response_malformed_types_cannot_clear_work(self):
+        uri = dict(kind="uri", target="recorded:resolution", base=None, sha256=None, revision=None)
+        cases = []
+        for history in (None, {}, [], [None], [dict(status="resolved", by=[], recorded_at=NOW, artifacts=[])]):
+            bad = resolved_blocker([uri]); bad["history"] = history; cases.append(("blockers", bad))
+        for references in ([], "bad", [None], [dict(kind="uri", target="not-a-uri", base=None)]):
+            bad = resolved_blocker([uri]); bad["artifacts"] = references; cases.append(("blockers", bad))
+        for response in (None, [], {}, dict(text="Decision", by=[], recorded_at=NOW, artifacts=[]),
+                         dict(text="Decision", by="owner", recorded_at=[], artifacts=[]),
+                         dict(text="Decision", by="owner", recorded_at=NOW, artifacts="bad")):
+            bad = terminal_feedback(); bad["disposition"] = response; cases.append(("feedback", bad))
+        bad = terminal_feedback(); bad["history"][-1]["status"] = "open"; cases.append(("feedback", bad))
+        for kind, record in cases:
+            with self.subTest(kind=kind, record=record):
+                value = state()
+                value["visibility"][kind] = {"bad": record}
+                feature, diagnostics = project(value)
+                self.assertIsNone(feature["tasks"][0]["readiness"]["start_eligible"])
+                self.assertEqual(record["status"], feature[kind][0]["status"])
+                self.assertIn(kind + ".bad.status", feature["unavailable"])
+                self.assertTrue(diagnostics)
+
+    def test_unverified_terminal_proof_is_scoped_to_affected_work(self):
+        value = state()
+        value["tasks"]["second"] = task()
+        value["visibility"]["blockers"] = {"resolution": resolved_blocker([])}
+        feature, _ = project(value)
+        self.assertIsNone(feature["tasks"][0]["readiness"]["start_eligible"])
+        self.assertTrue(feature["tasks"][1]["readiness"]["start_eligible"])
+        value["visibility"]["blockers"]["resolution"] = blocker()
+        feature, _ = project(value)
+        self.assertFalse(feature["tasks"][0]["readiness"]["start_eligible"])
+        self.assertTrue(feature["tasks"][1]["readiness"]["start_eligible"])
+
+    def test_nonblocking_information_does_not_become_a_workflow_blocker(self):
+        value = state()
+        record = feedback("withdrawn")
+        record["blocking"] = False
+        value["visibility"]["feedback"] = {"information": record}
+        feature, diagnostics = project(value)
+        self.assertEqual("withdrawn", feature["feedback"][0]["status"])
+        self.assertIn("feedback.information.status", feature["unavailable"])
+        self.assertTrue(diagnostics)
+        self.assertEqual([], feature["blockers"])
+        self.assertEqual("ready", feature["tasks"][0]["readiness"]["dependencies"])
+        self.assertTrue(feature["tasks"][0]["readiness"]["start_eligible"])
 
     def test_unsupported_sources_and_invalid_call_arguments(self):
         for change in ({"schema_version": 99}, {"library_version": "2.0.0"},

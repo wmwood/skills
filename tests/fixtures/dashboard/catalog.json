@@ -611,24 +611,44 @@
               "task:build"
             ],
             "responsible": "synthetic owner",
-            "reported_by": "synthetic orchestrator",
+            "reported_by": "synthetic owner",
             "status": "resolved",
             "recorded_at": "2026-11-06T19:00:00Z",
             "resolved_at": "2026-11-06T19:30:00Z",
-            "artifacts": [],
+            "artifacts": [
+              {
+                "kind": "file",
+                "target": "resolution.txt",
+                "base": "workspace",
+                "sha256": null,
+                "revision": null,
+                "artifact_id": "mode-resolution"
+              }
+            ],
             "history": [
               {
                 "status": "resolved",
                 "recorded_at": "2026-11-06T19:30:00Z",
                 "by": "synthetic owner",
-                "artifacts": []
+                "artifacts": [
+                  {
+                    "kind": "file",
+                    "target": "resolution.txt",
+                    "base": "workspace",
+                    "sha256": null,
+                    "revision": null,
+                    "artifact_id": "mode-resolution"
+                  }
+                ]
               }
             ]
           }
         }
       ],
       "remove_files": [],
-      "extra_files": {},
+      "extra_files": {
+        "resolution.txt": "Synthetic selected mode A and resolution evidence.\n"
+      },
       "raw_state": null,
       "expected": {
         "feature_count": 1,
@@ -785,7 +805,14 @@
               "recorded_at": "2026-11-06T19:10:00Z",
               "artifacts": []
             },
-            "history": []
+            "history": [
+              {
+                "status": "resolved",
+                "by": "synthetic orchestrator",
+                "recorded_at": "2026-11-06T19:20:00Z",
+                "artifacts": []
+              }
+            ]
           }
         }
       ],
@@ -831,10 +858,22 @@
             "blocking": true,
             "status": "withdrawn",
             "recorded_at": "2026-11-06T19:00:00Z",
-            "resolved_at": null,
+            "resolved_at": "2026-11-06T19:20:00Z",
             "answer": null,
-            "disposition": null,
-            "history": []
+            "disposition": {
+              "text": "Question withdrawn with recorded owner disposition",
+              "by": "synthetic owner",
+              "recorded_at": "2026-11-06T19:10:00Z",
+              "artifacts": []
+            },
+            "history": [
+              {
+                "status": "withdrawn",
+                "by": "synthetic orchestrator",
+                "recorded_at": "2026-11-06T19:20:00Z",
+                "artifacts": []
+              }
+            ]
           }
         }
       ],
@@ -3075,6 +3114,312 @@
             "spec_revision": 1,
             "phase": "unknown"
           }
+        }
+      }
+    },
+    {
+      "id": "unproven-resolved-blocker",
+      "acceptance_ids": [
+        "DV-05",
+        "DV-06",
+        "DV-13",
+        "DV-15"
+      ],
+      "patches": [
+        {
+          "op": "set",
+          "path": "/visibility/blockers/mode",
+          "value": {
+            "reason": "Select the fixture mode",
+            "resolution_condition": "Record the owner's selected mode",
+            "blocks": [
+              "task:build"
+            ],
+            "responsible": "synthetic owner",
+            "reported_by": "synthetic orchestrator",
+            "status": "resolved",
+            "recorded_at": "2026-11-06T19:00:00Z",
+            "resolved_at": "2026-11-06T19:30:00Z",
+            "artifacts": [],
+            "history": [
+              {
+                "status": "resolved",
+                "recorded_at": "2026-11-06T19:30:00Z",
+                "by": "synthetic owner",
+                "artifacts": []
+              }
+            ]
+          }
+        }
+      ],
+      "remove_files": [],
+      "extra_files": {},
+      "raw_state": null,
+      "expected": {
+        "feature_count": 1,
+        "completeness": "partial",
+        "diagnostic_codes": [
+          "INVALID_METADATA"
+        ],
+        "absent_diagnostic_codes": [],
+        "paths": {
+          "/features/0/blockers/0/status": "resolved",
+          "/features/0/tasks/0/readiness/dependencies": "ready",
+          "/features/0/tasks/0/readiness/start_eligible": null,
+          "/features/0/unavailable/blockers.mode.status": "invalid"
+        }
+      }
+    },
+    {
+      "id": "unproven-withdrawn-feedback",
+      "acceptance_ids": [
+        "DV-05",
+        "DV-07",
+        "DV-13",
+        "DV-15"
+      ],
+      "patches": [
+        {
+          "op": "set",
+          "path": "/visibility/feedback/mode",
+          "value": {
+            "question": "Which synthetic mode should be used?",
+            "artifact": {
+              "kind": "file",
+              "target": "specs/0001.md",
+              "base": "workspace",
+              "sha256": null,
+              "revision": null
+            },
+            "requester": "synthetic orchestrator",
+            "respondent": "synthetic owner",
+            "blocks": [
+              "task:build"
+            ],
+            "blocking": true,
+            "status": "withdrawn",
+            "recorded_at": "2026-11-06T19:00:00Z",
+            "resolved_at": null,
+            "answer": null,
+            "disposition": null,
+            "history": []
+          }
+        }
+      ],
+      "remove_files": [],
+      "extra_files": {},
+      "raw_state": null,
+      "expected": {
+        "feature_count": 1,
+        "completeness": "partial",
+        "diagnostic_codes": [
+          "INVALID_METADATA"
+        ],
+        "absent_diagnostic_codes": [],
+        "paths": {
+          "/features/0/feedback/0/status": "withdrawn",
+          "/features/0/tasks/0/readiness/dependencies": "ready",
+          "/features/0/tasks/0/readiness/start_eligible": null,
+          "/features/0/unavailable/feedback.mode.status": "invalid"
+        }
+      }
+    },
+    {
+      "id": "nonblocking-unproven-withdrawal",
+      "acceptance_ids": [
+        "DV-05",
+        "DV-07",
+        "DV-13",
+        "DV-15"
+      ],
+      "patches": [
+        {
+          "op": "set",
+          "path": "/visibility/feedback/mode",
+          "value": {
+            "question": "Which synthetic mode should be used?",
+            "artifact": {
+              "kind": "file",
+              "target": "specs/0001.md",
+              "base": "workspace",
+              "sha256": null,
+              "revision": null
+            },
+            "requester": "synthetic orchestrator",
+            "respondent": "synthetic owner",
+            "blocks": [
+              "task:build"
+            ],
+            "blocking": false,
+            "status": "withdrawn",
+            "recorded_at": "2026-11-06T19:00:00Z",
+            "resolved_at": null,
+            "answer": null,
+            "disposition": null,
+            "history": []
+          }
+        }
+      ],
+      "remove_files": [],
+      "extra_files": {},
+      "raw_state": null,
+      "expected": {
+        "feature_count": 1,
+        "completeness": "partial",
+        "diagnostic_codes": [
+          "INVALID_METADATA"
+        ],
+        "absent_diagnostic_codes": [],
+        "paths": {
+          "/features/0/feedback/0/status": "withdrawn",
+          "/features/0/tasks/0/readiness/dependencies": "ready",
+          "/features/0/tasks/0/readiness/start_eligible": true,
+          "/features/0/unavailable/feedback.mode.status": "invalid"
+        }
+      }
+    },
+    {
+      "id": "unavailable-blocker-resolution",
+      "acceptance_ids": [
+        "DV-05",
+        "DV-06",
+        "DV-13",
+        "DV-15"
+      ],
+      "patches": [
+        {
+          "op": "set",
+          "path": "/visibility/blockers/mode",
+          "value": {
+            "reason": "Select the fixture mode",
+            "resolution_condition": "Record the owner's selected mode",
+            "blocks": [
+              "task:build"
+            ],
+            "responsible": "synthetic owner",
+            "reported_by": "synthetic owner",
+            "status": "resolved",
+            "recorded_at": "2026-11-06T19:00:00Z",
+            "resolved_at": "2026-11-06T19:30:00Z",
+            "artifacts": [
+              {
+                "kind": "file",
+                "target": "resolution.txt",
+                "base": "workspace",
+                "sha256": null,
+                "revision": null,
+                "artifact_id": "mode-resolution"
+              }
+            ],
+            "history": [
+              {
+                "status": "resolved",
+                "recorded_at": "2026-11-06T19:30:00Z",
+                "by": "synthetic owner",
+                "artifacts": [
+                  {
+                    "kind": "file",
+                    "target": "resolution.txt",
+                    "base": "workspace",
+                    "sha256": null,
+                    "revision": null,
+                    "artifact_id": "mode-resolution"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "remove_files": [
+        "resolution.txt"
+      ],
+      "extra_files": {
+        "resolution.txt": "Synthetic selected mode A and resolution evidence.\n"
+      },
+      "raw_state": null,
+      "expected": {
+        "feature_count": 1,
+        "completeness": "partial",
+        "diagnostic_codes": [
+          "INVALID_METADATA",
+          "MISSING_ARTIFACT"
+        ],
+        "absent_diagnostic_codes": [],
+        "paths": {
+          "/features/0/blockers/0/status": "resolved",
+          "/features/0/tasks/0/readiness/dependencies": "ready",
+          "/features/0/tasks/0/readiness/start_eligible": null,
+          "/features/0/unavailable/blockers.mode.status": "missing"
+        }
+      }
+    },
+    {
+      "id": "uri-resolved-blocker",
+      "acceptance_ids": [
+        "DV-05",
+        "DV-06",
+        "DV-13",
+        "DV-15"
+      ],
+      "patches": [
+        {
+          "op": "set",
+          "path": "/visibility/blockers/mode",
+          "value": {
+            "reason": "Select the fixture mode",
+            "resolution_condition": "Record the owner's selected mode",
+            "blocks": [
+              "task:build"
+            ],
+            "responsible": "synthetic owner",
+            "reported_by": "synthetic owner",
+            "status": "resolved",
+            "recorded_at": "2026-11-06T19:00:00Z",
+            "resolved_at": "2026-11-06T19:30:00Z",
+            "artifacts": [
+              {
+                "kind": "uri",
+                "target": "https://example.invalid/resolution",
+                "base": null,
+                "sha256": null,
+                "revision": null,
+                "artifact_id": "mode-resolution"
+              }
+            ],
+            "history": [
+              {
+                "status": "resolved",
+                "recorded_at": "2026-11-06T19:30:00Z",
+                "by": "synthetic owner",
+                "artifacts": [
+                  {
+                    "kind": "uri",
+                    "target": "https://example.invalid/resolution",
+                    "base": null,
+                    "sha256": null,
+                    "revision": null,
+                    "artifact_id": "mode-resolution"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "remove_files": [],
+      "extra_files": {},
+      "raw_state": null,
+      "expected": {
+        "feature_count": 1,
+        "completeness": "complete",
+        "diagnostic_codes": [],
+        "absent_diagnostic_codes": [],
+        "paths": {
+          "/features/0/blockers/0/status": "resolved",
+          "/features/0/tasks/0/readiness/dependencies": "ready",
+          "/features/0/tasks/0/readiness/start_eligible": true,
+          "/features/0/blockers/0/artifacts/0/availability/reason": "not_recorded"
         }
       }
     }
