@@ -1,0 +1,69 @@
+{
+  "schema_version": 2,
+  "library_version": "1.1.0",
+  "generation": 1,
+  "feature_id": "demo",
+  "lifecycle": "active",
+  "ticket_sha256": "e6d698e7f208c38ba716d84f31e9c9118180d631f92f8fc79ff9e27d25e52cab",
+  "spec_revision": 1,
+  "spec_sha256": "660a02a23d42a88ff7d83d2047ac8d466e77c61b2fdecdfeaab81eac07b44890",
+  "spec_approval": {
+    "human": "Synthetic owner",
+    "evidence": "Synthetic approval fixture",
+    "date": "2026-11-06",
+    "revision": 1,
+    "sha256": "660a02a23d42a88ff7d83d2047ac8d466e77c61b2fdecdfeaab81eac07b44890"
+  },
+  "tasks": {
+    "build": {
+      "status": "pending",
+      "depends_on": [],
+      "owner": null,
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "review": null
+    }
+  },
+  "gates": {},
+  "integrated_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "integration": null,
+  "pr": null,
+  "merge": null,
+  "resources": {},
+  "cleanup": null,
+  "cleanup_authorization": null,
+  "visibility": {
+    "version": "1.0.0",
+    "workspace_id": "fixture",
+    "eligibility": {
+      "spec_revision": 1,
+      "spec_sha256": "660a02a23d42a88ff7d83d2047ac8d466e77c61b2fdecdfeaab81eac07b44890",
+      "approval": {
+        "human": "Synthetic owner",
+        "evidence": "Synthetic approval fixture",
+        "date": "2026-11-06",
+        "revision": 1,
+        "sha256": "660a02a23d42a88ff7d83d2047ac8d466e77c61b2fdecdfeaab81eac07b44890"
+      },
+      "task_ids": [
+        "build"
+      ],
+      "recorded_at": "2026-11-06T19:00:00Z"
+    },
+    "phases": [],
+    "blockers": {},
+    "feedback": {},
+    "assignments": {},
+    "activity": null,
+    "control": {
+      "owner_role": "orchestrator",
+      "execution_authorized": true,
+      "evidence": {
+        "kind": "file",
+        "target": "control.txt",
+        "base": "workspace",
+        "sha256": null,
+        "revision": null
+      }
+    }
+  }
+}
