@@ -24,8 +24,5 @@ A task commit and immutable attempt report ready for independent review. State c
 ## Failure and recovery
 On interruption preserve edits and record actual branch/HEAD/status, completed checks and next action in a distinct checkpoint/report; do not stash/reset or delete evidence. A replacement verifies this evidence and current spec before resuming. Report blocked dependencies, scope conflicts or persistent test failures to Orchestrator with investigated causes and options; never change requirements silently.
 
-## Visibility reporting
-Include observed activity and its actual reported time, known agent/session and chat references, explicit blockers with resolution conditions, and unresolved human questions with their relevant artifact and affected work in the separate report, using the [recording shapes](../feature-workflow/references/snapshot.md#recording-extension). Leave unavailable information unknown. Orchestrator alone ingests those records; task status or assignment does not prove a running agent.
-
 ## Resource handoff
 Report every created worktree/branch, temporary directory and full container/network ID with owner, purpose, exact path, source HEAD and task ID immediately to Orchestrator for the feature manifest. Include resources and unrecorded creation attempts in interruption reports. Supply durable report paths and retention needs before releasing a worktree; only Orchestrator performs explicitly authorized cleanup under the [cleanup protocol](../feature-workflow/references/cleanup.md). Keep application/shared resource ownership explicit.

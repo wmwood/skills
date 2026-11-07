@@ -24,8 +24,5 @@ A feature-wide validation report tied to the latest approved specification and i
 ## Failure and recovery
 If requirements are contradictory, report the investigated conflict to Orchestrator for human decision; never lower acceptance thresholds. On interruption preserve partial evidence and rerun checks needed for a reliable verdict. A new HEAD or spec requires fresh validation; do not reuse a stale pass.
 
-## Visibility reporting
-Report actual validation activity/time, available chat references, explicit blockers/resolution conditions and unresolved human feedback with its relevant artifact and affected work using the [recording shapes](../feature-workflow/references/snapshot.md#recording-extension). Orchestrator records phase/activity and feedback disposition; you remain report-only. Missing validation evidence stays blocked, independent of activity freshness or a recorded feedback answer.
-
 ## Resource handoff
 Report every created worktree/branch, temporary directory and full container/network ID with owner, purpose, exact path, source HEAD and task ID immediately to Orchestrator for the feature manifest. Include resources and unrecorded creation attempts in interruption reports. Supply durable report paths and retention needs before releasing a worktree; only Orchestrator performs explicitly authorized cleanup under the [cleanup protocol](../feature-workflow/references/cleanup.md). Keep application/shared resource ownership explicit.

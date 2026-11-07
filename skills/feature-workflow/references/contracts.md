@@ -6,7 +6,7 @@ Library version: 1.1.0. State schema: 2. Skills install as sibling directories, 
 
 - Human: product/business intent, approval of initial ticket and each requirements revision, PR approval, explicit cleanup authorization.
 - Ticket Writer: investigate and interview, produce one comprehensive ticket; never task decomposition or implementation.
-- Planner: verify initialization, create external feature state and feature worktree, decompose approved scope; no integration or task completion.
+- Planner: investigate/interview unstructured requests or reuse an approved ticket, obtain exact-scope approval, verify initialization, create external feature state and feature worktree, and decompose approved scope; no integration or task completion. Ticket Writer is optional.
 - Orchestrator: sole writer of canonical state after planning, sole integrator and task completer; serializes mutations. Agents write separate reports, never concurrently edit state.
 - Implementer: one task branch/worktree; no canonical state writes, integration, or self-review.
 - Reviewer: different agent from author; read-only code review tied to exact commit and spec revision.
@@ -43,15 +43,3 @@ Schema 2 adds `lifecycle`, `merge`, `resources`, and `cleanup`. `resources` is t
 ## Compatibility
 
 Manual releases include all sibling skills and a manifest with library/schema version and content hashes. During manual update compare old/new manifests, detect missing/mixed resources and schema/authority changes, inventory active workspaces from user-provided locations (no global scanning), checkpoint first, and propose instruction-only changes in isolated worktrees. Unknown major/schema versions block resumption. Never rewrite ticket/history or infer product approval. Preserve backups and rollback instructions; do not resume agents until the single Orchestrator reconciles compatibility.
-
-
-
-## Dashboard visibility recording
-
-The optional version 1.0.0 visibility extension and independent JSON snapshot contract are specified in [snapshot.md](snapshot.md). State schema remains 2. Missing metadata is legacy/unavailable information; reading does not adopt, mutate, lock, poll services, run checks or clean resources.
-
-Ticket Writer is an optional scope-preparation utility. Planner may investigate/interview an unstructured request, obtain human approval of the resulting scope, then produce tasks. Prepared approved scope is reused without unnecessary repeat approval. Initial visibility follows approval plus actual ticket/task production; subsequent investigation or requirements approval waits remain visible independently of lifecycle.
-
-Planner owns initial recording until handoff; only Orchestrator writes afterward. Workers report separately. Typed helper operations record explicit blockers, feedback and disposition history, assignments, reported activity/chats, phase evidence and existing control authority. They do not create approval, infer liveness or replace dependencies/canonical task status. Initial eligibility retains its actual approved artifact binding through later revisions. Review/gate currency still depends on exact target HEAD/specification.
-
-Existing schema 2 workspaces can remain readable without metadata adoption. Explicit adoption requires owner quiescence, a unique durable state backup and inspected evidence. Narrow immediate rollback is digest-bound, refuses intervening changes, and preserves history. No historical timestamps or approvals are reconstructed. See [writer requests and recovery](cli.md#structured-visibility-recording).
