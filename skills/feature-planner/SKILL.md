@@ -1,86 +1,30 @@
 ---
 name: feature-planner
-description: Interview a user exhaustively through a dependency-aware design tree, confirm shared understanding, and propose an implementation plan. Use for substantial ideas or underspecified work when the user wants decisions surfaced before planning; this skill requires Plan mode and must not implement the result.
+description: Interview an unstructured feature request or reuse an approved ticket, then create dependency-aware tasks and an isolated feature workspace after scope approval and repository initialization.
 ---
 
 # Feature Planner
 
-Build complete shared understanding before proposing a plan. Optimize for eliminating hidden assumptions, not for reaching implementation quickly.
+## Activation and inputs
+Use to prepare a feature for implementation. Inputs: an unstructured request, draft or prepared ticket; any existing approval evidence; repository; explicit committed baseline; and available external workspace location. Ticket Writer is optional. Read the [shared contract](../feature-workflow/references/contracts.md) and [shared operations](../feature-workflow/references/operations.md). Requires Git and Python 3.10+ for deterministic helpers; no mode switch is required.
 
-## Require Plan Mode
+## Authority
+Investigate and interview to define scope, obtain human approval, then create the feature branch/worktree, initial external state, specification and task plan. Humans approve product behavior. A request or invocation of Planner is not scope approval. Do not implement tasks, integrate branches, mark tasks complete, approve product changes, or modify the original checkout. Planning authorization does not authorize dispatch or PR publishing.
 
-Run this workflow only in Plan mode, where `request_user_input` is available.
+## Procedure
+1. Inspect instructions and Git state. Verify AGENTS.md and GLOSSARY.md exist and describe repository commands, architecture, ownership and terminology; route missing initialization to Repository Initializer before implementation planning. Capture original branch, HEAD, status and index evidence without stashing, cleaning or changing them.
+2. Resolve scope before decomposition. For an unstructured, incomplete or unapproved request, inspect repository-answerable facts, interview the owner only on unresolved product decisions, and present one comprehensive scope draft with stable acceptance IDs, constraints and failure cases. Keep drafts, questions and investigation evidence outside repository worktrees. Obtain explicit human approval of the exact scope and record its artifact digest/date/session evidence. Reuse a valid prepared approved ticket without repeating interview or approval; changed or contradictory scope requires approval of the affected consolidated scope before planning. Unanswered questions never imply approval. Do not produce task tickets or initialize canonical feature state/worktrees until scope approval is established.
+3. Resolve an absolute external feature workspace outside all checked-out trees. Check absence of target branch/path; choose unique `codex/<feature>` naming. Prepare the isolated feature worktree destination and explicit committed baseline; the next step creates it once through init. Disclose that original uncommitted work is excluded. Never reuse existing paths on a fresh creation attempt; keep any earlier private scope-draft/handoff location separate from the new canonical workspace.
+4. Prepare approved ticket/specification inputs in the separate external handoff location. Reuse the exact approved ticket content for the initial full specification unless a different full specification already has matching explicit approval evidence. Read the [helper request interface](../feature-workflow/references/cli.md) and CLI help, then invoke init once to preserve immutable `ticket.md` and `specs/0001.md`, initialize `state.json` and create the feature worktree. Do not precreate its reserved workspace/path/branch. Record partial creation in a checkpoint rather than overwriting it.
+5. Decompose the approved scope into independently implementable task tickets and canonical task entries. Each records acceptance IDs, scope and excluded work, file/component ownership, interface contracts, dependencies, test commands as argument arrays, expected deliverables and baseline requirements. Validate unique IDs, present dependencies and an acyclic graph. Serialize overlapping ownership or redesign boundaries; do not dispatch competing edits. Task branches use `codex/<feature>-task-<id>` to avoid a Git ref prefix collision.
+6. Cover every acceptance criterion with tasks and a feature-wide validation strategy; identify review, integration, quality gate and PR prerequisites. Keep tasks pending and runtime ownership/review/integration evidence unset.
+7. Prepare the plan and resource/context handoff. Transfer sole canonical ownership to Orchestrator only when execution is authorized. Planner stops canonical writes after handoff; planning does not authorize implementation dispatch.
 
-If the current session is not in Plan mode, stop before investigating, interviewing, planning, or modifying files. Tell the user to switch Codex to Plan mode and invoke `$feature-planner` again. Do not substitute ordinary assistant-text questions and do not attempt to change modes on the user's behalf.
+## Outputs and completion
+An approved exact-scope ticket and approval evidence; isolated feature branch/worktree; approved initial consolidated specification; initialized external state; complete dependency-safe task tickets/acceptance coverage; and a prepared dispatch handoff. Report original-checkout preservation and unresolved blockers. Planning completion is neither task completion nor execution/PR authorization.
 
-Plan mode is necessary but does not itself authorize implementation. This skill ends with a proposed plan for review.
+## Failure and recovery
+Missing scope approval keeps the draft and interview private and prevents decomposition/initialization. Reject unsafe paths, pre-existing creation targets, cycles or unexplained ownership collisions. Preserve partial artifacts and inspect actual worktrees/branches/state before retry; never delete or reset the original checkout. If execution authorization is missing, return the prepared plan without dispatch.
 
-## Model the Design Tree
-
-Represent each meaningful user decision as a node. Record its prerequisites and any decisions it unlocks.
-
-- Do not silently choose a meaningful branch for the user.
-- Do not collapse alternatives merely to move faster.
-- Exclude low-value implementation trivia that follows mechanically from settled decisions.
-- Treat the user's answers as settled unless they explicitly reopen them.
-- Let each answer add, remove, or reshape branches; do not follow a fixed questionnaire.
-
-Maintain the tree internally unless showing it would materially help the user. The **frontier** is every unresolved decision whose prerequisites are settled.
-
-## Interview in Dependency-Aware Rounds
-
-At the start of each round, recompute the frontier from scratch. Ask only frontier questions; defer any question that depends on an answer still unresolved in the current round.
-
-Use `request_user_input` for every decision question. Never ask a blocking decision as ordinary prose.
-
-For each question:
-
-1. State and number the decision clearly.
-2. Offer mutually exclusive concrete options when the option space is knowable.
-3. Put the recommended option first, label it `(Recommended)`, and explain the tradeoff concisely.
-4. Preserve the tool's free-form answer path so the user may choose something else.
-
-Ask the complete frontier together when the tool supports it. When the frontier exceeds the tool's per-call question limit, ask up to that limit as one frontier slice, wait for the answers, then recompute before asking the next slice. Do not ask a downstream question early merely to fill a slice.
-
-After every answer set, update settled decisions and dependencies, discover any newly meaningful branches, and recompute the frontier. Continue until it is empty.
-
-## Separate Facts from Decisions
-
-Finding facts is Codex's responsibility; making decisions is the user's.
-
-Inspect the available repository, filesystem, source, configuration, documentation, logs, schemas, APIs, connected tools, and relevant external sources rather than asking the user for facts Codex can determine.
-
-When independent fact-finding can run concurrently and sub-agents are both available and authorized, delegate it. Treat an unfinished investigation as an unsettled prerequisite: hold back only its dependent questions and continue with the rest of the frontier. Do not ask the user to perform research for convenience.
-
-Ask only for intent, preferences, constraints, or tradeoffs that cannot be safely determined from facts already available. Do not repeat answered questions or ask speculative downstream questions.
-
-## Confirm Shared Understanding
-
-The interview is complete only when every meaningful branch has been resolved, intentionally rejected, or marked out of scope and the frontier is empty.
-
-Then present:
-
-- the complete intended design;
-- the important settled decisions and constraints;
-- rejected and out-of-scope branches;
-- any unavoidable remaining assumptions; and
-- a statement that the design tree appears complete.
-
-Use `request_user_input` to ask the user to confirm shared understanding. Do not plan until they confirm. If they do not confirm, reopen the tree and continue interviewing.
-
-## Propose the Plan
-
-After confirmation, inspect the environment again as needed and translate the settled design tree into a concrete, reviewable implementation plan.
-
-The plan must:
-
-- preserve agreed decisions, constraints, tradeoffs, and exclusions;
-- organize required work into logical phases and ordered steps;
-- identify dependencies and likely affected files, components, systems, APIs, schemas, migrations, infrastructure, tests, and documentation;
-- include validation for each meaningful phase;
-- call out relevant risks, edge cases, compatibility and migration concerns, and rollback considerations; and
-- distinguish required work from optional improvements.
-
-Do not reopen a settled decision unless implementation research reveals a real contradiction or new constraint. If that happens, return to the design tree, ask only the newly necessary decision with `request_user_input`, reconfirm shared understanding if the design materially changes, and resume planning.
-
-Present the completed plan for review and explicitly request approval. Do not implement, modify project files, execute the plan, or take external actions under this skill. Implementation requires a separate explicit user instruction after plan approval.
+## Resource handoff
+Transfer the schema 2 resource manifest and creation checkpoints with exact feature worktree path, branch, owner and original checkout identity. Reconcile interrupted creation before dispatch. Register additional resources under the [cleanup protocol](../feature-workflow/references/cleanup.md); planning and publication do not authorize deletion.
