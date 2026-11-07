@@ -466,6 +466,46 @@ class _Projection:
         return dict(record=deepcopy(record), currency=currency, artifacts=refs)
 
 
+def _pending_integration(p, tasks):
+    """Classify the supported helper's persisted intent, never dict truthiness."""
+    intent = p.state.get("integration")
+    if intent is None:
+        return "missing", False
+
+    def unknown(message, path="integration", reason="invalid", code="INVALID_METADATA"):
+        p.absent(path, reason)
+        p.diag(code, message)
+        return "unknown", False
+
+    if not isinstance(intent, dict):
+        return unknown("Integration intent must be a recorded object")
+    if (not all(_text(intent.get(k)) for k in ("task", "source_head", "parent", "phase"))
+            or not _positive(intent.get("spec_revision"))):
+        return unknown("Integration intent lacks typed task/source_head/parent/spec_revision/phase evidence")
+    if intent["phase"] != "prepared":
+        return unknown("Unsupported pending integration phase: " + intent["phase"],
+                       "integration.phase", "unsupported", "UNKNOWN_STATUS")
+    source_task = tasks.get(intent["task"])
+    if not isinstance(source_task, dict):
+        return unknown("Integration intent references an unknown produced task", "integration.task")
+    current_head = p.state.get("integrated_head")
+    revision = p.state.get("spec_revision")
+    if not _text(source_task.get("head")) or not _text(current_head) or not _positive(revision):
+        return unknown("Integration intent lacks recorded current task/head/specification bindings")
+    if (intent["source_head"] != source_task["head"] or intent["parent"] != current_head
+            or intent["spec_revision"] != revision):
+        p.absent("integration.currency", "inconsistent")
+        p.diag("INVALID_METADATA", "Integration intent targets no longer match recorded task/head/specification")
+        return "obsolete", False
+    if source_task.get("status") != "reviewed":
+        return unknown("Prepared integration intent is not bound to a reviewed source task",
+                       "integration.task_status")
+    if not p.current_approval:
+        p.absent("integration.currency")
+        return "unknown", False
+    return "current", True
+
+
 def _completion_evidence(p, lifecycle, pr, cleanup):
     """Check recorded bindings only; this is not live merge/resource verification."""
     state = p.state
@@ -701,7 +741,8 @@ def project_feature(state, *, repository_id, workspace_id, source_id, now,
             elif operation["status"] == "active":
                 p.absent("phases." + operation["id"], "invalid")
                 p.diag("INVALID_METADATA", "Active operation lacks valid reported evidence")
-    if isinstance(state.get("integration"), dict) and state["integration"]:
+    pending_integration_currency, active_integration = _pending_integration(p, tasks)
+    if active_integration:
         phases.add("integrating")
     reviews = {}
     projected_tasks = []
@@ -789,20 +830,8 @@ def project_feature(state, *, repository_id, workspace_id, source_id, now,
                        currency="unknown" if integration_record is not None else "missing", artifacts=[])
     if integration_record is None:
         p.absent("integration")
-    elif not isinstance(integration_record, dict):
-        p.diag("INVALID_METADATA", "Invalid integration record")
-        p.absent("integration", "invalid")
     elif state.get("integration") is not None:
-        intent = integration_record
-        source_task = tasks.get(intent.get("task")) if isinstance(intent.get("task"), str) else None
-        if (intent.get("spec_revision") != state.get("spec_revision")
-                or (_text(intent.get("parent")) and intent["parent"] != state.get("integrated_head"))):
-            integration["currency"] = "obsolete"
-        elif (p.current_approval and isinstance(source_task, dict)
-                and _text(intent.get("source_head")) and intent["source_head"] == source_task.get("head")
-                and intent.get("parent") == state.get("integrated_head")
-                and intent.get("phase") in ("prepared", "committed")):
-            integration["currency"] = "current"
+        integration["currency"] = pending_integration_currency
     else:
         outcomes = []
         for key, record in integration_record["completed"].items():

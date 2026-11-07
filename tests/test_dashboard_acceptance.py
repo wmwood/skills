@@ -85,7 +85,7 @@ class DashboardAcceptanceTests(unittest.TestCase):
                 path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
         shutil.rmtree(self.root)
 
-    def fixture(self, case=None, name="feature with spaces cafÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©", identity="workspace"):
+    def fixture(self, case=None, name="feature with spaces cafÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â©", identity="workspace"):
         workspace = self.features / name
         workspace.mkdir()
         artifacts = json.loads((FIXTURES / "artifacts.json").read_text(encoding="utf-8"))
@@ -157,6 +157,40 @@ class DashboardAcceptanceTests(unittest.TestCase):
                     state_sha = hashlib.sha256((workspace / "state.json").read_bytes()).hexdigest()
                     if first["sources"][0]["state_sha256"] is not None:
                         self.assertEqual(state_sha, first["sources"][0]["state_sha256"])
+
+    def test_pending_integration_needs_real_recorded_operation_evidence(self):
+        valid = dict(task="build", source_head="a" * 40, parent="b" * 40,
+                     spec_revision=1, phase="prepared")
+        cases = [
+            ({"invalid": "no operation evidence"}, "unknown", "INVALID_METADATA"),
+            (dict(task="build", parent="b" * 40, spec_revision=1, phase="prepared"),
+             "unknown", "INVALID_METADATA"),
+            (dict(valid, source_head=[]), "unknown", "INVALID_METADATA"),
+            (dict(valid, phase="made-up"), "unknown", "UNKNOWN_STATUS"),
+            (dict(valid, phase="committed", commit="d" * 40), "unknown", "UNKNOWN_STATUS"),
+            (dict(valid, parent="c" * 40), "obsolete", "INVALID_METADATA"),
+            (valid, "current", None),
+        ]
+        for index, (intent, currency, code) in enumerate(cases):
+            with self.subTest(intent=intent):
+                self.config["workspaces"] = []
+                workspace = self.fixture(name="integration intent " + str(index))
+                value = self.state(workspace)
+                value["tasks"]["build"]["status"] = "reviewed"
+                value["integration"] = deepcopy(intent)
+                dump(workspace / "state.json", value)
+                before = fingerprint(workspace)
+                snapshot = self.snapshot()
+                feature = snapshot["features"][0]
+                self.assertEqual(currency, feature["integration"]["currency"])
+                self.assertEqual(intent, feature["integration"]["record"])
+                self.assertEqual(currency == "current", "integrating" in feature["phases"])
+                if code:
+                    self.assertEqual("partial", snapshot["completeness"])
+                    self.assertIn(code, {d["code"] for d in snapshot["diagnostics"]})
+                else:
+                    self.assertEqual("complete", snapshot["completeness"])
+                self.assertEqual(before, fingerprint(workspace))
 
     def test_catalog_and_manual_boundaries_cover_every_acceptance_id(self):
         criteria = {"DV-%02d" % i for i in range(1, 16)}
@@ -257,7 +291,7 @@ class DashboardAcceptanceTests(unittest.TestCase):
         first = self.snapshot()
         self.assertEqual(["repo/workspace/demo"], [f["id"] for f in first["features"]])
         before_ids = [a["id"] for a in first["features"][0]["artifacts"] if a["id"]]
-        moved = self.features / "relocated feature cafÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©"
+        moved = self.features / "relocated feature cafÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â©"
         workspace.rename(moved)
         self.config["workspaces"].append(dict(id="workspace", repository_id="repo", path=str(moved)))
         second = self.snapshot()

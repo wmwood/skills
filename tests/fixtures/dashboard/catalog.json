@@ -2903,6 +2903,180 @@
           "/features/0/cleanup/record/cleanup/items/1/error": "Synthetic retained resource"
         }
       }
+    },
+    {
+      "id": "malformed-integration-intent",
+      "acceptance_ids": [
+        "DV-04",
+        "DV-10",
+        "DV-13",
+        "DV-15"
+      ],
+      "patches": [
+        {
+          "op": "set",
+          "path": "/integration",
+          "value": {
+            "invalid": "no operation evidence"
+          }
+        }
+      ],
+      "remove_files": [],
+      "extra_files": {},
+      "raw_state": null,
+      "expected": {
+        "feature_count": 1,
+        "completeness": "partial",
+        "diagnostic_codes": [
+          "INVALID_METADATA"
+        ],
+        "absent_diagnostic_codes": [],
+        "paths": {
+          "/features/0/phases": [
+            "planned"
+          ],
+          "/features/0/integration/currency": "unknown",
+          "/features/0/integration/record": {
+            "invalid": "no operation evidence"
+          }
+        }
+      }
+    },
+    {
+      "id": "missing-integration-intent-field",
+      "acceptance_ids": [
+        "DV-04",
+        "DV-10",
+        "DV-13",
+        "DV-15"
+      ],
+      "patches": [
+        {
+          "op": "set",
+          "path": "/integration",
+          "value": {
+            "task": "build",
+            "parent": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "spec_revision": 1,
+            "phase": "prepared"
+          }
+        }
+      ],
+      "remove_files": [],
+      "extra_files": {},
+      "raw_state": null,
+      "expected": {
+        "feature_count": 1,
+        "completeness": "partial",
+        "diagnostic_codes": [
+          "INVALID_METADATA"
+        ],
+        "absent_diagnostic_codes": [],
+        "paths": {
+          "/features/0/phases": [
+            "planned"
+          ],
+          "/features/0/integration/currency": "unknown",
+          "/features/0/integration/record": {
+            "task": "build",
+            "parent": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "spec_revision": 1,
+            "phase": "prepared"
+          }
+        }
+      }
+    },
+    {
+      "id": "wrong-typed-integration-intent",
+      "acceptance_ids": [
+        "DV-04",
+        "DV-10",
+        "DV-13",
+        "DV-15"
+      ],
+      "patches": [
+        {
+          "op": "set",
+          "path": "/integration",
+          "value": {
+            "task": "build",
+            "source_head": [],
+            "parent": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "spec_revision": 1,
+            "phase": "prepared"
+          }
+        }
+      ],
+      "remove_files": [],
+      "extra_files": {},
+      "raw_state": null,
+      "expected": {
+        "feature_count": 1,
+        "completeness": "partial",
+        "diagnostic_codes": [
+          "INVALID_METADATA"
+        ],
+        "absent_diagnostic_codes": [],
+        "paths": {
+          "/features/0/phases": [
+            "planned"
+          ],
+          "/features/0/integration/currency": "unknown",
+          "/features/0/integration/record": {
+            "task": "build",
+            "source_head": [],
+            "parent": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "spec_revision": 1,
+            "phase": "prepared"
+          }
+        }
+      }
+    },
+    {
+      "id": "unsupported-integration-intent-phase",
+      "acceptance_ids": [
+        "DV-04",
+        "DV-10",
+        "DV-13",
+        "DV-15"
+      ],
+      "patches": [
+        {
+          "op": "set",
+          "path": "/integration",
+          "value": {
+            "task": "build",
+            "source_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "parent": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "spec_revision": 1,
+            "phase": "unknown"
+          }
+        }
+      ],
+      "remove_files": [],
+      "extra_files": {},
+      "raw_state": null,
+      "expected": {
+        "feature_count": 1,
+        "completeness": "partial",
+        "diagnostic_codes": [
+          "UNKNOWN_STATUS"
+        ],
+        "absent_diagnostic_codes": [],
+        "paths": {
+          "/features/0/phases": [
+            "planned"
+          ],
+          "/features/0/integration/currency": "unknown",
+          "/features/0/integration/record": {
+            "task": "build",
+            "source_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "parent": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "spec_revision": 1,
+            "phase": "unknown"
+          }
+        }
+      }
     }
   ],
   "manual_evidence": [

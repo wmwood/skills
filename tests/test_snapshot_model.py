@@ -195,9 +195,10 @@ class SnapshotModelTests(unittest.TestCase):
     def test_lifecycle_and_concurrent_phases_do_not_assert_liveness(self):
         value = state()
         value["lifecycle"] = "published"
-        value["tasks"]["first"].update(status="review", owner="worker")
+        value["tasks"]["first"].update(status="reviewed", owner="worker")
         value["tasks"]["second"] = task(status="implementing")
-        value["integration"] = {"phase": "prepared", "spec_revision": 1}
+        value["integration"] = dict(task="first", source_head=HEAD, parent=HEAD,
+                                    spec_revision=1, phase="prepared")
         feature, _ = project(value)
         self.assertEqual("published", feature["lifecycle"])
         self.assertEqual(["implementing", "integrating", "published", "under_review"], feature["phases"])
@@ -370,6 +371,7 @@ class SnapshotModelTests(unittest.TestCase):
 
     def test_integration_currency_uses_only_matching_recorded_evidence(self):
         value = state()
+        value["tasks"]["first"]["status"] = "reviewed"
         value["integration"] = dict(task="first", phase="prepared", source_head=HEAD,
                                     parent=HEAD, spec_revision=1)
         feature, _ = project(value)
@@ -596,6 +598,81 @@ class SnapshotModelTests(unittest.TestCase):
         self.assertNotIn("cleanup_authorization", feature["unavailable"])
         self.assertFalse(any("authorization" in d["message"] for d in diagnostics))
         self.assertIsNone(feature["cleanup"]["record"]["cleanup_authorization"])
+
+    def integration_state(self):
+        value = state()
+        value["tasks"]["first"]["status"] = "reviewed"
+        value["integration"] = dict(task="first", source_head=HEAD, parent=HEAD,
+                                    spec_revision=1, phase="prepared")
+        return value
+
+    def test_pending_integration_requires_typed_supported_operation_evidence(self):
+        valid = self.integration_state()["integration"]
+        malformed = [{"invalid": "no operation evidence"}, {}, [], "not an object"]
+        for field in valid:
+            missing = deepcopy(valid)
+            del missing[field]
+            malformed.append(missing)
+        for field, wrong_type in (("task", []), ("source_head", {}),
+                                  ("parent", []), ("spec_revision", True), ("phase", [])):
+            changed = deepcopy(valid)
+            changed[field] = wrong_type
+            malformed.append(changed)
+        malformed.append(dict(valid, phase="unrecognized"))
+        malformed.append(dict(valid, phase="committed", commit="d" * 40, tree="e" * 40))
+        for intent in malformed:
+            with self.subTest(intent=intent):
+                value = self.integration_state()
+                value["integration"] = deepcopy(intent)
+                feature, diagnostics = project(value)
+                self.assertNotIn("integrating", feature["phases"])
+                self.assertEqual("unknown", feature["integration"]["currency"])
+                self.assertTrue(diagnostics)
+                self.assertTrue(any(d["code"] in {"INVALID_METADATA", "UNKNOWN_STATUS"} for d in diagnostics))
+                if isinstance(intent, dict):
+                    self.assertEqual(intent, feature["integration"]["record"])
+
+    def test_pending_integration_binds_known_reviewed_task_and_current_targets(self):
+        for field, changed in (("source_head", "c" * 40), ("parent", "c" * 40),
+                               ("spec_revision", 2)):
+            value = self.integration_state()
+            value["integration"][field] = changed
+            feature, diagnostics = project(value)
+            self.assertEqual("obsolete", feature["integration"]["currency"])
+            self.assertNotIn("integrating", feature["phases"])
+            self.assertTrue(diagnostics)
+        for change in ("unknown_task", "pending_task", "missing_task_head", "missing_parent"):
+            value = self.integration_state()
+            if change == "unknown_task":
+                value["integration"]["task"] = "missing"
+            elif change == "pending_task":
+                value["tasks"]["first"]["status"] = "pending"
+            elif change == "missing_task_head":
+                value["tasks"]["first"]["head"] = None
+            else:
+                value["integrated_head"] = None
+            feature, diagnostics = project(value)
+            self.assertEqual("unknown", feature["integration"]["currency"])
+            self.assertNotIn("integrating", feature["phases"])
+            self.assertTrue(diagnostics)
+
+    def test_prepared_interruption_remains_active_but_completed_history_does_not(self):
+        value = self.integration_state()
+        # The helper persists this prepared state before Git commit. If Git
+        # commits before state result is saved, these canonical bindings remain.
+        value["integration"].update(tree="e" * 40, tests=[{"exit_code": 0}])
+        feature, _ = project(value)
+        self.assertEqual("current", feature["integration"]["currency"])
+        self.assertIn("integrating", feature["phases"])
+        self.assertIsNone(feature["activity"])
+        completed = dict(value["integration"], phase="committed", commit="d" * 40)
+        value["integration"] = None
+        value["tasks"]["first"].update(status="complete", integration_commit="d" * 40,
+                                        integration_evidence=completed)
+        feature, _ = project(value)
+        self.assertEqual("current", feature["integration"]["currency"])
+        self.assertNotIn("integrating", feature["phases"])
+        self.assertEqual(completed, feature["integration"]["record"]["completed"]["first"])
 
     def test_unsupported_sources_and_invalid_call_arguments(self):
         for change in ({"schema_version": 99}, {"library_version": "2.0.0"},
