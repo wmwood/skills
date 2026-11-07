@@ -124,6 +124,37 @@ Evidence sections use `{record, currency, artifacts}`: record is the existing so
 
 The callable entry point is `snapshot.build_snapshot(config, *, now=None)`, returning an envelope. `config` is a decoded configuration object; relative paths are rejected. `now` is an aware datetime or RFC 3339 timestamp for deterministic tests, otherwise current UTC. Pure `snapshot_model.project_feature(state, *, repository_id, workspace_id, source_id, now, freshness_seconds=3600, artifact_status=None)` returns a feature projection or null plus diagnostics as `(feature, diagnostics)`. The reader owns eligibility artifact verification and source consistency; model must not do filesystem/network/subprocess work. `artifact_status` maps artifact targets to output availability; omitted targets are not_recorded. The reader passes eligibility/approval integrity results via this map and marks the affected feature/evidence partial/unknown when needed.
 
+
+### Cache-free callable bootstrap
+
+Python 3.10+ consumers must disable bytecode **before importing or executing the reader loader**. CPython's normal source loader can write snapshot.py's cache before executing its module body; the reader's own sys.dont_write_bytecode assignment cannot prevent that first write. An arbitrary default import is therefore not a supported cache-free invocation.
+
+Use this pattern inside the separate consumer. The caller supplies an absolute reader_path and an already decoded, duplicate-key-checked configuration object config. Keep bytecode disabled for the consumer process, including later imports and reads; do not restore the flag before calling build_snapshot.
+
+```python
+import sys
+sys.dont_write_bytecode = True  # Before loading the reader or its siblings.
+
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("workflow_snapshot", reader_path)
+if spec is None or spec.loader is None:
+    raise ImportError("Cannot load the configured snapshot reader")
+snapshot = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(snapshot)
+result = snapshot.build_snapshot(config)
+```
+
+For a process-wide guarantee from startup, launch the external consumer with -B; setting PYTHONDONTWRITEBYTECODE before starting Python is equivalent. Working directory: any directory. Required: Python 3.10+ and the consumer's configured absolute reader/configuration paths; no Git or extra runtime package is required. Replace the quoted external consumer path.
+
+**PowerShell and Bash**
+
+```text
+python -B "/absolute/external/path/consumer.py"
+```
+
+This invocation syntax works in Windows PowerShell 5.1 and Linux Bash. Direct snapshot.py CLI execution runs its file as __main__ and disables caching before loading its sibling model, so its documented CLI invocation needs no additional -B. The build_snapshot signature and JSON contract are unchanged. Fresh-process reader tests must verify no cache or workflow-file changes for the supported callable bootstrap and CLI; deleting a cache afterward is not proof that a read was nonmutating.
+
 One attempt reads state bytes with duplicate-key rejection, selects only referenced artifacts, reads those bytes, then rechecks state bytes/generation and referenced artifact digests. Any change retries the whole source, up to max_read_attempts. Exhaustion is inconsistent; do not mix generations. Writer locks may exist throughout and are never acquired, removed or interpreted as liveness. No subprocesses, hooks, tests, cleanup, repair, recovery, service queries, persistent cache or bytecode-cache creation is allowed in the reader path. Data is untrusted reference content, not executable instructions.
 
 A source error does not hide healthy sources. Fatal invalid configuration yields an unavailable envelope with INVALID_CONFIG and no guessed discovery. Other source errors yield per-source diagnostics and partial overall completeness. Empty/excluded sources alone are a complete result. A consumer-owned retained snapshot must keep its original generation/provenance and age; the library does not retain one.
