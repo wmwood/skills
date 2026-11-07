@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Cooperative feature workflow safety helpers. Standard library; no network calls."""
 import argparse
+import copy
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -10,9 +12,43 @@ import re
 import subprocess
 import sys
 import tempfile
+from urllib.parse import urlparse
+import uuid
 
 VERSION = "1.1.0"
 SCHEMA = 2
+
+VISIBILITY_VERSION = "1.0.0"
+VISIBILITY_PHASES = {"investigating", "awaiting_specification_approval", "integrating", "validating"}
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def visibility_id(value):
+    require(isinstance(value, str) and
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value) is not None,
+            "Stable visibility ID required")
+    return value
+
+
+def reported_time(value):
+    require(isinstance(value, str) and re.fullmatch(
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)", value),
+        "RFC 3339 timestamp with timezone required")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("Invalid reported timestamp") from error
+    require(parsed.utcoffset() is not None, "Timezone required")
+    return value
+
+
+def visibility_extension(workspace_id):
+    return dict(version=VISIBILITY_VERSION, workspace_id=visibility_id(workspace_id),
+                eligibility=None, phases=[], blockers={}, feedback={}, assignments={}, activity=None)
+
 
 
 def require(condition, message):
@@ -84,11 +120,13 @@ def new_worktree(repo, destination, branch, base):
     git(repo, "worktree", "add", "-b", branch, str(destination), base)
 
 
-def initialize(repo, workspace, feature_id, ticket, spec, approved, base="HEAD"):
+def initialize(repo, workspace, feature_id, ticket, spec, approved, base="HEAD", workspace_id=None):
     repo = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
     require(Path(workspace).is_absolute(), "Absolute workspace required")
     workspace = external(repo, workspace)
     identifier(feature_id)
+    if workspace_id is not None:
+        visibility_id(workspace_id)
     approval(approved)
     require(not workspace.exists(), "Feature workspace already exists")
     commit = git(repo, "rev-parse", "--verify", base + "^{commit}")
@@ -115,6 +153,8 @@ def initialize(repo, workspace, feature_id, ticket, spec, approved, base="HEAD")
                  tasks={}, gates={}, integration=None, pr=None,
                  cleanup_authorization=None, lifecycle="active", merge=None,
                  resources={}, cleanup=None, generation=0)
+    if workspace_id is not None:
+        state["visibility"] = visibility_extension(workspace_id)
     state["resources"]["feature"] = dict(kind="worktree", path=state["feature_worktree"],
         branch=branch, owner=feature_id, purpose="feature", task_id=None, status="creating")
     atomic_json(workspace / "checkpoints/initialization.json", state)
@@ -147,6 +187,23 @@ class Workspace:
             require(self.state["spec_approval"].get("revision") == self.state["spec_revision"] and
                     self.state["spec_approval"].get("sha256") == self.state["spec_sha256"],
                     "Approval does not match specification")
+            metadata = self.state.get("visibility")
+            require("visibility" not in self.state or isinstance(metadata, dict) and
+                    metadata.get("version") == VISIBILITY_VERSION,
+                    "Incompatible visibility extension; invoke manual Library Update")
+            if isinstance(metadata, dict):
+                require(all(k not in metadata or isinstance(metadata[k], dict)
+                            for k in ("blockers", "feedback", "assignments")) and
+                        ("phases" not in metadata or isinstance(metadata["phases"], list)),
+                        "Malformed visibility collections; reconcile before writing")
+            control = metadata.get("control") if isinstance(metadata, dict) else None
+            require(control is None or isinstance(control, dict) and
+                    control.get("owner_role") in ("planner", "orchestrator") and
+                    type(control.get("execution_authorized")) is bool,
+                    "Malformed ownership control; reconcile before writing")
+            require(self.role != "planner" or not isinstance(control, dict) or
+                    control.get("owner_role") != "orchestrator",
+                    "Canonical ownership already handed to Orchestrator")
             yield self
             self.state["generation"] += 1
             atomic_json(self.path / "state.json", self.state)
@@ -171,6 +228,320 @@ class Workspace:
 
     def invalidate(self):
         self.state["gates"] = {}
+
+    def visibility(self):
+        self.only("planner", "orchestrator")
+        value = self.state.get("visibility")
+        require(isinstance(value, dict) and value.get("version") == VISIBILITY_VERSION,
+                "Explicit compatible visibility adoption required")
+        control = value.get("control")
+        require(not isinstance(control, dict) or control.get("owner_role") != "orchestrator" or
+                self.role == "orchestrator", "Canonical ownership already handed to Orchestrator")
+        return value
+
+    def visibility_artifact(self, value):
+        require(isinstance(value, dict) and value.get("kind") in ("file", "uri") and
+                isinstance(value.get("target"), str) and value["target"].strip(),
+                "Typed artifact reference required")
+        result = copy.deepcopy(value)
+        for field in ("base", "sha256", "revision"):
+            result.setdefault(field, None)
+        require(result["sha256"] is None or isinstance(result["sha256"], str) and
+                re.fullmatch(r"[a-f0-9]{64}", result["sha256"]), "Invalid artifact digest")
+        require(result["revision"] is None or type(result["revision"]) is int and
+                result["revision"] > 0, "Invalid artifact revision")
+        if "artifact_id" in result:
+            visibility_id(result["artifact_id"])
+        if result["kind"] == "uri":
+            require(result["base"] is None and urlparse(result["target"]).scheme,
+                    "URI artifact needs a scheme and null base")
+        else:
+            raw = Path(result["target"])
+            require(result["base"] in (None, "workspace") and
+                    (raw.is_absolute() or result["base"] == "workspace"), "Artifact base required")
+            path = raw if raw.is_absolute() else self.path / raw
+            require(inside(path, self.path), "Artifact escapes workspace")
+            for part in (path, *path.parents):
+                if part == self.path.parent:
+                    break
+                require(not part.is_symlink() and not (part.exists() and
+                        getattr(part.lstat(), "st_file_attributes", 0) & 0x400),
+                        "Linked artifact path")
+            require(path.is_file(), "Artifact evidence file unavailable")
+            require(result["sha256"] is None or digest(path) == result["sha256"],
+                    "Artifact evidence digest mismatch")
+        return result
+
+    def visibility_targets(self, targets):
+        require(isinstance(targets, list) and all(isinstance(t, str) for t in targets) and
+                len(targets) == len(set(targets)), "Unique target references required")
+        phases = VISIBILITY_PHASES | {"planned", "implementing", "under_review", "published",
+                                    "merged", "awaiting_cleanup", "closed"}
+        operations = {p["id"] for p in self.visibility().get("phases", [])}
+        for target in targets:
+            kind, separator, key = target.partition(":")
+            require(target == "feature" or separator and (
+                    kind == "task" and key in self.state["tasks"] or
+                    kind == "operation" and key in operations or
+                    kind == "phase" and key in phases), "Unknown visibility target")
+        return list(targets)
+
+    def visibility_report(self, kind, record_id, record):
+        suffix = hashlib.sha256(record_id.encode("utf-8")).hexdigest()[:12]
+        return self.save_report("visibility-" + kind + "-" + suffix,
+                                dict(actor=self.actor, role=self.role, record=copy.deepcopy(record)))
+
+    def adopt_visibility(self, workspace_id, quiescent, evidence):
+        self.only("planner", "orchestrator")
+        require("visibility" not in self.state, "Visibility already present; do not overwrite")
+        require(quiescent is True, "Owner quiescence acknowledgment required")
+        proof = self.visibility_artifact(evidence)
+        value = dict(version=VISIBILITY_VERSION, workspace_id=visibility_id(workspace_id),
+                     eligibility=None)
+        backup_dir = self.path / "backups"
+        require(inside(backup_dir, self.path) and not backup_dir.is_symlink() and
+                not (backup_dir.exists() and
+                     getattr(backup_dir.lstat(), "st_file_attributes", 0) & 0x400),
+                "Linked adoption backup directory")
+        backup_dir.mkdir(exist_ok=True)
+        target = backup_dir / ("visibility-" + uuid.uuid4().hex + ".json")
+        with target.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(self.state, stream, indent=2)
+            stream.write("\n")
+        value["adoption"] = dict(backup=str(target.relative_to(self.path)), sha256=digest(target),
+                                generation=self.state["generation"], actor=self.actor,
+                                recorded_at=utc_now(), evidence=proof)
+        self.state["visibility"] = value
+        if self.state["tasks"]:
+            try:
+                eligibility = self.initial_visibility_evidence()
+            except ValueError:
+                # Unsupported/malformed legacy proof stays unpublished, never reconstructed.
+                value["adoption"]["legacy_eligibility"] = "not_verified"
+            else:
+                self.visibility_report("publication", "initial", eligibility)
+                value["eligibility"] = eligibility
+        return copy.deepcopy(value["adoption"])
+
+    def rollback_visibility(self, backup, backup_sha256, current_sha256, quiescent, evidence):
+        value = self.visibility()
+        require(quiescent is True, "Owner quiescence acknowledgment required")
+        self.visibility_artifact(evidence)
+        record = value.get("adoption", {})
+        require(backup == record.get("backup") and backup_sha256 == record.get("sha256"),
+                "Rollback must name this adoption backup")
+        require(digest(self.path / "state.json") == current_sha256, "Current state changed")
+        require(self.state["generation"] == record.get("generation", -2) + 1,
+                "Intervening transaction; reconcile instead of rollback")
+        target = (self.path / backup).resolve()
+        require(inside(target, self.path / "backups") and target.is_file() and
+                digest(target) == backup_sha256, "Invalid adoption backup")
+        previous = json.loads(target.read_text(encoding="utf-8"))
+        current = {k: v for k, v in self.state.items() if k not in ("visibility", "generation")}
+        original = {k: v for k, v in previous.items() if k != "generation"}
+        require("visibility" not in previous and current == original,
+                "Other canonical content changed; rollback refused")
+        self.visibility_report("rollback", "adoption", dict(backup=backup,
+                               backup_sha256=backup_sha256, recorded_at=utc_now(), evidence=evidence))
+        del self.state["visibility"]
+
+    def initial_visibility_evidence(self, task_ids=None):
+        self.visibility()
+        tasks = self.state["tasks"]
+        require(isinstance(tasks, dict) and tasks, "Produced tasks required")
+        allowed = {"pending", "implementing", "review", "reviewed", "complete"}
+        for key, task in tasks.items():
+            identifier(key)
+            require(isinstance(task, dict) and task.get("status") in allowed and
+                    isinstance(task.get("depends_on"), list), "Malformed produced task")
+            deps = task["depends_on"]
+            require(all(isinstance(d, str) and d in tasks for d in deps) and
+                    len(deps) == len(set(deps)), "Invalid produced dependencies")
+        visiting, done = set(), set()
+        def visit(key):
+            require(key not in visiting, "Cyclic produced dependencies")
+            if key in done:
+                return
+            visiting.add(key)
+            for dependency in tasks[key]["depends_on"]:
+                visit(dependency)
+            visiting.remove(key)
+            done.add(key)
+        for key in tasks:
+            visit(key)
+        selected = sorted(tasks) if task_ids is None else task_ids
+        require(isinstance(selected, list) and selected and
+                all(isinstance(k, str) and k in tasks for k in selected) and
+                len(selected) == len(set(selected)), "Produced task IDs required")
+        approved = self.state["spec_approval"]
+        approval(approved)
+        require(all(isinstance(approved[k], str) and approved[k].strip()
+                    for k in ("human", "evidence", "date")), "Invalid approval evidence")
+        require(approved["revision"] == self.state["spec_revision"] and
+                approved["sha256"] == self.state["spec_sha256"], "Current approval binding required")
+        require(re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", approved["date"]) is not None,
+                "Approval date must be ASCII ISO calendar date YYYY-MM-DD")
+        require(datetime.strptime(approved["date"], "%Y-%m-%d").date().isoformat() == approved["date"],
+                "Approval date must be canonical ISO calendar date")
+        return dict(spec_revision=self.state["spec_revision"],
+            spec_sha256=self.state["spec_sha256"], approval=copy.deepcopy(approved),
+            task_ids=sorted(selected), recorded_at=utc_now())
+
+    def publish_visibility(self, task_ids=None):
+        value = self.visibility()
+        require(value["eligibility"] is None, "Initial eligibility is immutable")
+        record = self.initial_visibility_evidence(task_ids)
+        self.visibility_report("publication", "initial", record)
+        value["eligibility"] = record
+        return copy.deepcopy(record)
+
+    def record_control(self, execution_authorized, evidence):
+        value = self.visibility()
+        require(type(execution_authorized) is bool, "Boolean existing authority required")
+        require(self.role == "orchestrator" or not execution_authorized,
+                "Planner cannot assert implementation authority")
+        record = dict(owner_role=self.role, execution_authorized=execution_authorized,
+                      evidence=self.visibility_artifact(evidence))
+        self.visibility_report("control", self.role, record)
+        value["control"] = record
+
+    def record_phase(self, operation_id, phase, status, reported_at, artifact):
+        value = self.visibility()
+        require(value["eligibility"] is not None, "Initial publication required")
+        visibility_id(operation_id)
+        require(phase in VISIBILITY_PHASES and status in ("active", "finished"),
+                "Known phase and operation status required")
+        previous = next((p for p in value.get("phases", []) if p["id"] == operation_id), None)
+        require(previous is None or previous["phase"] == phase, "Operation phase identity changed")
+        require(previous is None or previous["status"] != "finished",
+                "Finished operation is immutable; use a new operation ID")
+        record = dict(id=operation_id, phase=phase, status=status,
+                      reported_at=reported_time(reported_at),
+                      artifact=self.visibility_artifact(artifact))
+        self.visibility_report("phase", operation_id, record)
+        value["phases"] = [p for p in value.get("phases", []) if p["id"] != operation_id] + [record]
+
+    def record_blocker(self, blocker_id, reason, resolution_condition, blocks,
+                       responsible=None, artifacts=None, status="open"):
+        value = self.visibility()
+        visibility_id(blocker_id)
+        require(isinstance(reason, str) and reason.strip() and
+                isinstance(resolution_condition, str) and resolution_condition.strip(),
+                "Blocker reason and resolution condition required")
+        require(status in ("open", "resolved") and
+                (responsible is None or isinstance(responsible, str) and responsible.strip()),
+                "Invalid blocker state or responsible role/person")
+        refs = [self.visibility_artifact(a) for a in (artifacts or [])]
+        require(status != "resolved" or refs, "Resolution evidence required")
+        previous = value.get("blockers", {}).get(blocker_id)
+        require(previous is not None or status == "open", "New blocker must be open")
+        now = utc_now()
+        history = copy.deepcopy(previous["history"]) if previous else []
+        entry = dict(status=status, recorded_at=now, by=self.actor, artifacts=refs)
+        if previous:
+            entry["previous"] = {k: copy.deepcopy(v) for k, v in previous.items() if k != "history"}
+        history.append(entry)
+        record = dict(reason=reason, resolution_condition=resolution_condition,
+            blocks=self.visibility_targets(blocks), responsible=responsible, reported_by=self.actor,
+            status=status, recorded_at=previous["recorded_at"] if previous else now,
+            resolved_at=now if status == "resolved" else None, artifacts=refs, history=history)
+        self.visibility_report("blocker", blocker_id, record)
+        value.setdefault("blockers", {})[blocker_id] = record
+
+    def record_feedback(self, feedback_id, question, artifact, blocks, blocking,
+                        respondent=None, status="open", answer=None, disposition=None):
+        value = self.visibility()
+        visibility_id(feedback_id)
+        require(isinstance(question, str) and question.strip() and type(blocking) is bool and
+                (respondent is None or isinstance(respondent, str) and respondent.strip()),
+                "Question, Boolean blocking and optional respondent required")
+        require(status in ("open", "answered", "resolved", "withdrawn"), "Unknown feedback status")
+        targets = self.visibility_targets(blocks)
+        require(not blocking or targets, "Blocking feedback must name affected work")
+        previous = value.get("feedback", {}).get(feedback_id)
+        require(previous is not None or status == "open", "New feedback must be open")
+        require(status != "answered" or answer is not None, "Answered feedback needs answer evidence")
+        require(status not in ("resolved", "withdrawn") or disposition is not None,
+                "Resolution/withdrawal needs disposition evidence")
+        def response(data):
+            if data is None:
+                return None
+            require(isinstance(data, dict) and all(isinstance(data.get(k), str) and
+                    data[k].strip() for k in ("text", "by")), "Response text and identity required")
+            return dict(text=data["text"], by=data["by"],
+                        recorded_at=reported_time(data["recorded_at"]),
+                        artifacts=[self.visibility_artifact(a) for a in data.get("artifacts", [])])
+        answer, disposition = response(answer), response(disposition)
+        now = utc_now()
+        history = copy.deepcopy(previous["history"]) if previous else []
+        entry = dict(status=status, recorded_at=now, by=self.actor, artifacts=[])
+        if previous:
+            entry.update(previous_answer=copy.deepcopy(previous["answer"]),
+                         previous_disposition=copy.deepcopy(previous["disposition"]),
+                         previous={k: copy.deepcopy(v) for k, v in previous.items() if k != "history"})
+        if answer:
+            entry["artifacts"] += answer["artifacts"]
+        if disposition:
+            entry["artifacts"] += disposition["artifacts"]
+        history.append(entry)
+        record = dict(question=question, artifact=None if artifact is None else
+            self.visibility_artifact(artifact), requester=previous["requester"] if previous else self.actor,
+            respondent=respondent, blocks=targets, blocking=blocking, status=status,
+            recorded_at=previous["recorded_at"] if previous else now,
+            resolved_at=now if status in ("resolved", "withdrawn") else None,
+            answer=answer, disposition=disposition, history=history)
+        self.visibility_report("feedback", feedback_id, record)
+        value.setdefault("feedback", {})[feedback_id] = record
+
+    def visibility_activity(self, activity):
+        require(isinstance(activity, dict) and isinstance(activity.get("summary"), str) and
+                activity["summary"].strip() and (activity.get("agent_id") is None or
+                isinstance(activity["agent_id"], str) and activity["agent_id"].strip()),
+                "Reported activity summary and optional agent identity required")
+        record = dict(reported_at=reported_time(activity["reported_at"]),
+            summary=activity["summary"], agent_id=activity.get("agent_id"),
+            artifact=None if activity.get("artifact") is None else
+                self.visibility_artifact(activity["artifact"]), execution=None)
+        execution = activity.get("execution")
+        if execution is not None:
+            require(isinstance(execution, dict) and
+                    execution.get("status") in ("running", "stopped", "unknown"),
+                    "Explicit observed execution state required")
+            observed = execution.get("observed_at")
+            artifact = execution.get("artifact")
+            require(execution["status"] == "unknown" or observed is not None and artifact is not None,
+                    "Reported running/stopped needs observation time and evidence")
+            record["execution"] = dict(status=execution["status"],
+                observed_at=None if observed is None else reported_time(observed),
+                artifact=None if artifact is None else self.visibility_artifact(artifact))
+        return record
+
+    def record_activity(self, activity):
+        value = self.visibility()
+        record = self.visibility_activity(activity)
+        self.visibility_report("activity", "latest", record)
+        value["activity"] = record
+
+    def record_assignment(self, assignment_id, agent_id, role, task_id=None,
+                          last_activity=None, chats=None):
+        value = self.visibility()
+        visibility_id(assignment_id)
+        require(all(isinstance(v, str) and v.strip() for v in (agent_id, role)),
+                "Known agent/session identity and role required")
+        require(task_id is None or task_id in self.state["tasks"], "Unknown assigned task")
+        require(isinstance(chats or [], list), "Chat references must be an array")
+        references = []
+        for chat in chats or []:
+            require(isinstance(chat, dict) and all(isinstance(chat.get(k), str) and
+                    chat[k].strip() for k in ("provider", "id")) and
+                    (chat.get("uri") is None or isinstance(chat["uri"], str) and
+                     urlparse(chat["uri"]).scheme), "Actual typed chat reference required")
+            references.append(dict(provider=chat["provider"], id=chat["id"], uri=chat.get("uri")))
+        record = dict(agent_id=agent_id, role=role, task_id=task_id,
+            last_activity=None if last_activity is None else self.visibility_activity(last_activity),
+            chats=references)
+        self.visibility_report("assignment", assignment_id, record)
+        value.setdefault("assignments", {})[assignment_id] = record
 
     def add_task(self, task_id, depends_on, scope, acceptance_ids, tests):
         self.only("planner", "orchestrator")
@@ -608,7 +979,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=["init", "add-task", "start-task", "submit", "review", "return-task",
                         "integrate", "recover", "revise", "gate", "pr-ready", "record-pr", "register-resource",
-                        "cleanup-plan", "cleanup-apply", "cleanup-status"])
+                        "cleanup-plan", "cleanup-apply", "cleanup-status", "adopt-visibility",
+                        "rollback-visibility", "publish-visibility", "record-control", "record-phase",
+                        "record-blocker", "record-feedback", "record-assignment", "record-activity"])
     parser.add_argument("--request", required=True, help="UTF-8 JSON object of operation arguments")
     parser.add_argument("--workspace", help="Absolute external feature workspace (except init)")
     parser.add_argument("--actor", default="", help="Unique session/agent identity")

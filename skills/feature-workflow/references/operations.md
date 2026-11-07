@@ -26,3 +26,13 @@ Working directory: any directory. Required: Python 3.10+ and Git on PATH. Resolv
 ```text
 python "/absolute/path/to/feature-workflow/scripts/workflow.py" --help
 ```
+
+## Visibility reporting and read-only consumption
+
+Before changing or consuming visibility records, read [snapshot.md](snapshot.md) for the independent output contract, source extension, identities, unavailable data and initial publication boundary. Use [typed writer operations](cli.md#structured-visibility-recording) only under the existing canonical owner's authority. Ordinary status consumption uses the separate snapshot reader and never Workspace.transaction, pr-ready, cleanup-status or a migration operation.
+
+For direct unstructured Planner input, investigate/interview first, preserve private draft artifacts externally, obtain explicit scope approval, then produce the task plan and record initial visibility. Ticket Writer is optional. Reuse valid approved scope and approval evidence. The act of invoking Planner is not approval. Preserve initial eligibility when later requirements need investigation or another approved consolidated specification.
+
+Record the question, relevant artifact, affected work, responsible role/person when known, and explicit disposition evidence for human feedback. Ingest worker reports without granting workers canonical write authority. Feedback answers remain distinct from requirements approval. Record blockers and their resolution conditions explicitly; derive dependency waits from depends_on instead of duplicating them as blockers.
+
+Use actual reported timestamps and known agent/session/chat references. Unreported activity/liveness is unknown; task status, assignment, PID, lock or file mtime proves none of them. Report phases only with recorded operation evidence. Store evidence/backups outside repository worktrees and preserve them across worker cleanup. Existing workspaces need no migration for read-only projection; explicit owner-coordinated adoption/rollback follows the CLI compatibility protocol.
