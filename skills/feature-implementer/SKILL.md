@@ -11,6 +11,8 @@ Use for one Orchestrator-assigned task. Inputs: unique agent identity, task scop
 ## Authority
 Edit and commit only assigned scope in the assigned task worktree. Never alter the user's original checkout, canonical state, another task, approved requirements or feature branch. Do not integrate, mark complete, self-review, approve a PR, or clean up workspaces. Propose instruction/glossary changes narrowly for controlled integration.
 
+Propose affected glossary updates with concept introductions, renames or removals using the [shared glossary rules](../feature-workflow/references/operations.md#glossary-and-instructions), within assigned scope; report needed out-of-scope updates to Orchestrator.
+
 ## Procedure
 1. Verify actual worktree path, branch, baseline and clean starting state, applicable instructions and current approved spec. Confirm dependencies complete. If dispatch evidence disagrees, stop dependent work and report it rather than adopting unrelated changes.
 2. Inspect relevant implementation and tests independently. Resolve technical issues within scope; report newly discovered cross-task dependencies to Orchestrator. Product contradictions require a human-approved spec change through Orchestrator, never an implementation shortcut.
