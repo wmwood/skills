@@ -84,7 +84,7 @@ class WorkflowTests(unittest.TestCase):
         tree = Path(self.read()["tasks"][task]["worktree"])
         (tree / (task + ".txt")).write_text(task + "\n", encoding="utf-8")
         self.git(tree, "add", task + ".txt")
-        self.git(tree, "commit", "-m", "Implement " + task)
+        self.git(tree, "commit", "-m", "Add independent output in " + task + ".txt")
         self.invoke("submit", task_id=task)
         return tree
 
@@ -100,7 +100,7 @@ class WorkflowTests(unittest.TestCase):
         self.add(task)
         self.implement(task)
         self.review(task)
-        return self.invoke("integrate", task_id=task)
+        return self.invoke("integrate", task_id=task, message="Add independent output in " + task + ".txt")
 
     def gate(self, kind, **changes):
         state = self.read()
@@ -148,7 +148,7 @@ class WorkflowTests(unittest.TestCase):
             self.invoke("start_task", role="implementer", task_id="first", owner="author-first")
         self.implement()
         with self.assertRaisesRegex(ValueError, "review"):
-            self.invoke("integrate", task_id="first")
+            self.invoke("integrate", task_id="first", message="Add independent output in first.txt")
         self.assertEqual(self.read()["tasks"]["first"]["status"], "review")
 
     def test_parallel_tasks_review_and_serial_squash_integration(self):
@@ -160,8 +160,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.read()["tasks"]["first"]["base_commit"], self.read()["tasks"]["second"]["base_commit"])
         self.review("first")
         self.review("second")
-        a = self.invoke("integrate", task_id="first")
-        b = self.invoke("integrate", task_id="second")
+        a = self.invoke("integrate", task_id="first", message="Add independent output in first.txt")
+        b = self.invoke("integrate", task_id="second", message="Add independent output in second.txt")
         state = self.read()
         tree = state["feature_worktree"]
         self.assertEqual(self.git(tree, "rev-parse", b + "^"), a)
@@ -171,7 +171,62 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue((Path(tree) / "first.txt").is_file())
         self.assertTrue((Path(tree) / "second.txt").is_file())
         with self.assertRaises(ValueError):
+            self.invoke("integrate", task_id="first", message="Add independent output in first.txt")
+
+    def test_squash_message_describes_entire_task_and_preserves_evidence(self):
+        self.add()
+        worker = self.implement()
+        (worker / "first.txt").write_text("output with retry behavior\n", encoding="utf-8")
+        self.git(worker, "add", "first.txt")
+        self.git(worker, "commit", "-m", "Cover retry behavior after authentication fails")
+        self.invoke("return_task", task_id="first", reason="Include the retry repair in independent review")
+        self.invoke("submit", task_id="first")
+        self.review()
+        reviewed = self.read()["tasks"]["first"]["head"]
+        description = ("Fix login button remaining disabled after a failed sign-in\n\n"
+                       "Re-enable retry after authentication fails so users can correct their credentials.")
+        head = self.invoke("integrate", task_id="first", message=description)
+        state = self.read()
+        expected = (description + "\n\nFeature: sample\nTask: first\nSource-Head: " + reviewed +
+                    "\nSpec-Revision: 1")
+        self.assertEqual(self.git(state["feature_worktree"], "log", "-1", "--format=%B"), expected)
+        self.assertEqual(self.git(worker, "rev-list", "--count", state["base_commit"] + "..HEAD"), "2")
+        self.assertEqual(self.git(state["feature_worktree"], "rev-list", "--count", state["base_commit"] + "..HEAD"), "1")
+        self.assertEqual(state["tasks"]["first"]["integration_commit"], head)
+        self.assertEqual(state["tasks"]["first"]["integration_evidence"]["source_head"], reviewed)
+
+    def test_invalid_integration_messages_fail_before_git_or_checkpoint_mutation(self):
+        self.add()
+        self.implement()
+        self.review()
+        before = (self.path / "state.json").read_bytes()
+        tree = self.read()["feature_worktree"]
+        checkpoints = sorted(p.name for p in (self.path / "checkpoints").iterdir())
+        invalid = [None, False, 42, [], {}, "", " \r\n\t", "Implement first", "Integrate 01",
+                   "Fix task 01", "Implement <task-id>", "Fix login\nBody without separator",
+                   "Fix login\0button"]
+        for key in ("Feature", "Task", "Source-Head", "Spec-Revision"):
+            invalid.extend(["Fix login retry\n\n" + key + ": forged",
+                            "Fix login retry\n\n  " + key.lower() + " = forged"])
+        for message in invalid:
+            with self.subTest(message=message):
+                with self.assertRaises(ValueError):
+                    self.invoke("integrate", task_id="first", message=message)
+                self.assertEqual((self.path / "state.json").read_bytes(), before)
+                self.assertEqual(self.git(tree, "rev-parse", "HEAD"), self.read()["integrated_head"])
+                self.assertEqual(self.git(tree, "status", "--porcelain"), "")
+                self.assertEqual(sorted(p.name for p in (self.path / "checkpoints").iterdir()), checkpoints)
+        with self.assertRaises(TypeError):
             self.invoke("integrate", task_id="first")
+        self.assertEqual((self.path / "state.json").read_bytes(), before)
+        request = self.root / "integration request with spaces.json"
+        request.write_text(json.dumps({"task_id": "first"}), encoding="utf-8")
+        result = subprocess.run([sys.executable, str(HELPER), "integrate", "--request", str(request),
+                                 "--workspace", str(self.path), "--actor", "cli-session", "--role", "orchestrator"],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("message", result.stderr)
+        self.assertEqual((self.path / "state.json").read_bytes(), before)
 
     def test_review_requires_independence_exact_head_revision_and_unchanged_tree(self):
         self.add()
@@ -182,7 +237,7 @@ class WorkflowTests(unittest.TestCase):
         self.review()
         (tree / "first.txt").write_text("edited after review\n", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "changed after review"):
-            self.invoke("integrate", task_id="first")
+            self.invoke("integrate", task_id="first", message="Add independent output in first.txt")
 
     def test_review_rejection_returns_task_for_repair(self):
         self.add()
@@ -190,7 +245,7 @@ class WorkflowTests(unittest.TestCase):
         self.review(verdict="fail", findings=[{"severity": "blocking", "location": "first.txt", "reason": "missing behavior"}])
         self.assertEqual(self.read()["tasks"]["first"]["status"], "implementing")
         with self.assertRaises(ValueError):
-            self.invoke("integrate", task_id="first")
+            self.invoke("integrate", task_id="first", message="Add independent output in first.txt")
 
     def test_return_stale_review_for_repair_resubmit_and_integrate(self):
         self.add()
@@ -200,12 +255,12 @@ class WorkflowTests(unittest.TestCase):
         self.git(tree, "add", "first.txt")
         self.git(tree, "commit", "-m", "Repair after reviewed submission")
         with self.assertRaises(ValueError):
-            self.invoke("integrate", task_id="first")
+            self.invoke("integrate", task_id="first", message="Add independent output in first.txt")
         self.invoke("return_task", task_id="first", reason="Task changed; fresh independent review required")
         self.assertEqual(self.read()["tasks"]["first"]["status"], "implementing")
         self.invoke("submit", task_id="first")
         self.review()
-        self.invoke("integrate", task_id="first")
+        self.invoke("integrate", task_id="first", message="Add independent output in first.txt")
         self.assertEqual(self.read()["tasks"]["first"]["status"], "complete")
         with self.assertRaises(ValueError):
             self.invoke("return_task", task_id="first", reason="Cannot rewrite completed history")
@@ -226,7 +281,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual((self.path / "ticket.md").read_bytes(), ticket)
         self.assertEqual((self.path / "specs/0001.md").read_text(), "AC1: outputs exist.\n")
         with self.assertRaises(ValueError):
-            self.invoke("integrate", task_id="first")
+            self.invoke("integrate", task_id="first", message="Add independent output in first.txt")
 
     def test_ticket_tampering_incompatible_schema_and_live_lock_are_rejected(self):
         original = (self.path / "ticket.md").read_bytes()
@@ -290,12 +345,12 @@ class WorkflowTests(unittest.TestCase):
         state["tasks"]["first"]["tests"] = [[sys.executable, "-c", "raise SystemExit(1)"]]
         workflow.atomic_json(self.path / "state.json", state)
         with self.assertRaisesRegex(ValueError, "checks failed"):
-            self.invoke("integrate", task_id="first")
+            self.invoke("integrate", task_id="first", message="Add independent output in first.txt")
         state = self.read()
         self.assertEqual(state["tasks"]["first"]["status"], "reviewed")
         self.assertIsNotNone(state["integration"])
         with self.assertRaisesRegex(ValueError, "Unresolved integration"):
-            self.invoke("integrate", task_id="first")
+            self.invoke("integrate", task_id="first", message="Add independent output in first.txt")
         with self.assertRaisesRegex(ValueError, "clean"):
             self.invoke("recover")
 
@@ -308,7 +363,7 @@ class WorkflowTests(unittest.TestCase):
             "from pathlib import Path; Path('first.txt').write_text('test changed implementation')"]]
         workflow.atomic_json(self.path / "state.json", state)
         with self.assertRaisesRegex(ValueError, "changed files"):
-            self.invoke("integrate", task_id="first")
+            self.invoke("integrate", task_id="first", message="Add independent output in first.txt")
         self.assertEqual(self.read()["tasks"]["first"]["status"], "reviewed")
         self.assertEqual(self.git(state["feature_worktree"], "rev-parse", "HEAD"), state["base_commit"])
 
@@ -329,6 +384,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.read()["tasks"]["second"]["status"], "reviewed")
 
     def test_committed_but_unsaved_integration_recovers_without_duplicate_commit(self):
+        self.assert_interrupted_integration_recovers(legacy=False)
+
+    def test_legacy_generic_integration_still_recovers(self):
+        self.assert_interrupted_integration_recovers(legacy=True)
+
+    def assert_interrupted_integration_recovers(self, legacy):
         self.add()
         self.implement()
         self.review()
@@ -341,12 +402,18 @@ class WorkflowTests(unittest.TestCase):
 
         with patch.object(workflow, "atomic_json", side_effect=interrupt_after_commit):
             with self.assertRaisesRegex(OSError, "simulated interruption"):
-                self.invoke("integrate", task_id="first")
+                self.invoke("integrate", task_id="first", message="Add independent output in first.txt")
         state = self.read()
         tree = state["feature_worktree"]
         head = self.git(tree, "rev-parse", "HEAD")
         self.assertEqual(state["tasks"]["first"]["status"], "reviewed")
         self.assertIsNotNone(state["integration"])
+        # Legacy schema-2 checkpoints contain no requested message; their generic
+        # subjects remain recoverable through the original parent/tree/trailer evidence.
+        if legacy:
+            self.git(tree, "commit", "--amend", "-m", "Integrate first\n\nFeature: sample\nTask: first\nSource-Head: " +
+                     state["tasks"]["first"]["head"] + "\nSpec-Revision: 1")
+            head = self.git(tree, "rev-parse", "HEAD")
         result = self.invoke("recover")
         self.assertEqual(result, {"recovered": "committed", "head": head})
         self.assertEqual(self.git(tree, "rev-list", "--count", state["base_commit"] + "..HEAD"), "1")

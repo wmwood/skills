@@ -14,7 +14,7 @@ Each invocation takes one operation, `--request` pointing to a UTF-8 JSON object
 | submit | orchestrator | task_id; inspect committed worker result first |
 | review | orchestrator | task_id, report (independent reviewer artifact copied without altering verdict) |
 | return-task | orchestrator | task_id, reason (repair evidence); clears current review for an unfinished task, preserves reports |
-| integrate | orchestrator | task_id |
+| integrate | orchestrator | task_id, message (descriptive subject and optional explanatory body) |
 | recover | orchestrator | no fields; empty object |
 | revise | orchestrator | spec (new full consolidated specification path), approved, affected_tasks (all affected unfinished IDs) |
 | gate | orchestrator | kind (validation/quality), report |
@@ -38,6 +38,20 @@ Task test example (JSON):
 ```
 
 Use repository-specific commands, not this sample by default. Helpers run tests in the feature worktree after preparing the squash and before committing. They reject nonzero results and changed tracked/index/untracked content. Ignored build output is allowed. Checks have a ten-minute timeout each; use a narrower scoped command or manual checkpoint procedure for longer suites. Output is local checkpoint evidence and must be reviewed before sharing for secrets/private data.
+
+## Integration commit messages
+
+New integration requests require `message`; the helper does not generate a task-reference subject or copy only the worker's latest commit. Orchestrator writes a description of the entire independently reviewed task, including repairs, based on the actual diff. For example:
+
+```json
+{"task_id":"login-retry","message":"Fix login button remaining disabled after a failed sign-in\n\nRe-enable the button after authentication fails so users can correct their credentials and retry."}
+```
+
+Use only claims supported by that task's reviewed change. A single subject is sufficient when additional context adds little; separate an optional body from the subject with a blank line. The helper accepts natural descriptive language without requiring Conventional Commits or a fixed subject length. It rejects missing, blank or non-string input, NUL characters, and obvious reference-only subjects such as `Implement <task-id>`, `Integrate 01`, or `Fix task 01`. This catches placeholders, not semantic accuracy: Orchestrator and independent review must assess whether the description reflects the actual change.
+
+The helper appends authoritative `Feature`, `Task`, `Source-Head`, and `Spec-Revision` trailers. Do not include those fields in the supplied message; reserved field lines (case-insensitive, with a colon or equals sign) are rejected to avoid conflicting evidence. Validation precedes any squash mutation or pending integration checkpoint.
+
+Compatibility: callers that previously sent only `task_id` must add `message` before starting a new integration. No state-schema migration is needed. Existing schema-2 workspaces and interrupted integrations remain recoverable using their original parent/tree/trailer evidence, including historical generic subjects; never amend reviewed source commits or rewrite historical integrations to adopt this standard.
 
 ## Integration recovery
 
