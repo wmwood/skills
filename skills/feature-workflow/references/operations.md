@@ -16,6 +16,16 @@ Dispatch: role, unique agent identity, task ID/scope, contract path/version, app
 ## Glossary and instructions
 Initializer proposes repository-specific AGENTS.md and GLOSSARY.md on its isolated branch, retaining owner content. Define canonical term, meaning, code aliases and source. Distinguish product naming decisions (human-owned) from observed technical vocabulary. Workers propose narrow changes; Orchestrator alone serializes integration with review. Never overwrite instructions wholesale or introduce a second competing authority.
 
+Keep the glossary focused on repository-specific terms, ambiguous domain language and useful code aliases. Use concise definitions, relevant aliases and source links; leave ordinary programming vocabulary, feature history and detailed implementation explanations in their existing documentation.
+
+When a feature introduces, renames or removes a concept, update affected entries in the same reviewed feature. Remove obsolete entries and consolidate duplicates. Retain former names only when they still help readers understand existing code or supported compatibility. Follow the existing proposal, independent review and Orchestrator integration process.
+
+At the existing pre-PR quality gate, verify feature-touched terms against current code and sources, then briefly scan the remaining glossary for obvious duplicates, contradictions and obsolete concepts. Record actionable findings in the existing quality report and use the existing severity and repair process; this is not a separate exhaustive audit, report or approval stage.
+
+At that gate, also review the root glossary's approximate word count. Around 1,500 words is a soft review threshold: exceeding it prompts consolidation and removal of low-value entries, not an automatic gate failure, deletion or hard cap. If useful content remains large, consider moving specialist vocabulary into linked domain glossaries while keeping shared concepts in the root glossary. Keep linked entries concise and current too; moving content alone does not resolve bloat.
+
+For deeper investigation, load relevant definitions and source documents selectively rather than routinely loading every linked glossary in full. This does not replace the brief glossary scan above. Maintenance accompanies feature work and the existing quality gate; do not add recurring cleanup jobs, per-entry timestamps or age-based automatic deletion.
+
 ## Issue and PR publishing
 Prefer an available service connector, otherwise use an authenticated supported CLI such as gh. Read local tooling help before commands. Store exact multiline body in a file and pass a structured body/file argument; avoid shell interpolation. The local ticket is immutable; publish only with user authorization and record returned URL/id. For draft PR use approved base and feature branch, summary, acceptance evidence, tests, risks and unresolved nonblocking items. Query existing PRs by head/base before retrying a timed-out call. Never duplicate, approve or merge a PR. If tools/auth are missing, retain a reviewable local body and report the publishing blocker without pretending success.
 
