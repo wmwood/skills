@@ -24,6 +24,14 @@ State fields: `schema_version`, `library_version`, `feature_id`, `repo`, `origin
 
 Task scope additionally records acceptance IDs, file/component ownership, interface contracts, test commands, dependencies, and completion evidence. IDs are stable. A dependency graph must be acyclic, IDs unique, referenced tasks present. Overlapping ownership is serialized or redesigned before dispatch.
 
+## Commit descriptions
+
+Task commits and Orchestrator squash commits must describe the actual change in language that stands on its own in Git history. Name the affected behavior, component or issue and what changed: for example, `Fix login button remaining disabled after a failed sign-in`. Generic workflow actions or references such as `Implement 01`, `Integrate 01` and `Fix task 01` are insufficient. Keep task IDs for traceability in reports and integration metadata rather than using them as the description.
+
+Add a body when it helps explain the reason, cause or resulting behavior; every claim must be supported by the reviewed change. A simple change does not require filler. No Conventional Commit prefix, fixed subject length or rigid message template is required. Implementers describe their actual changes; independent reviewers assess those descriptions alongside the diff. Orchestrator describes the entire reviewed task, including repairs, for squash integration rather than copying only its latest source commit. Mechanical placeholder checks do not establish semantic accuracy.
+
+The [helper interface](cli.md) requires `message` for new integrations: a descriptive subject with an optional blank-line-separated body. The helper appends authoritative `Feature`, `Task`, `Source-Head` and `Spec-Revision` trailers; do not supply those field lines in `message`. Preserve exact-commit evidence and recovery rules. Apply the standard to new commits; do not rewrite historical commits. A message-only amend creates a new HEAD and invalidates its prior review like any other commit.
+
 ## Lifecycle and evidence
 
 Task transitions: pending -> implementing -> review -> reviewed -> complete. Review rejection returns review -> implementing with a new attempt. Blocking/interruption is recorded in checkpoints without claiming completion. Dependencies must be complete before implementation begins. Only Orchestrator marks complete after a verified squash integration commit on the feature branch. Review report contains author and reviewer identities (must differ), exact task HEAD, spec revision, findings with severity and location, test evidence, and verdict. New commits or requirements invalidate review. Requirements changes invalidate both feature gates; assess/reopen affected tasks and reviews explicitly.
