@@ -6,7 +6,7 @@ Each invocation takes one operation, `--request` pointing to a UTF-8 JSON object
 
 ## Initialize
 
-The helper derives and validates the new path using the primary checkout and the [workspace contract](contracts.md#external-workspace-and-artifacts). Omit `--workspace` for init. A legacy `workspace` JSON field must match the derived path or init fails before creating files or refs. Request access to the required path when the session cannot write there. Report an access denial with the derived path and stop.
+The helper derives and validates the new path using the primary checkout and the [workspace contract](contracts.md#external-workspace-and-artifacts). Omit `--workspace` for init. A legacy `workspace` JSON field must match the derived path or init fails before creating files or refs. If linked-checkout metadata cannot establish the primary checkout path, pass the primary checkout directly as `repo` and supply a committed `base` if needed. Request access to the required path when the session cannot write there. Report an access denial with the derived path and stop.
 
 ## Operations and JSON fields
 

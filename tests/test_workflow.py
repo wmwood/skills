@@ -142,6 +142,30 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue((expected / "state.json").is_file())
         self.assertEqual(state["base_commit"], self.git(checkout, "rev-parse", "HEAD"))
 
+    def test_initialization_with_separate_git_metadata_requires_primary_checkout_path(self):
+        primary = self.root / "separate checkout"
+        metadata = self.root / "separate metadata"
+        primary.mkdir()
+        self.git(primary, "init", "--separate-git-dir", str(metadata), "-b", "main")
+        for name in ("AGENTS.md", "GLOSSARY.md"):
+            shutil.copyfile(self.repo / name, primary / name)
+        self.git(primary, "add", ".")
+        self.git(primary, "-c", "user.name=Workflow Test", "-c", "user.email=workflow@example.invalid",
+                 "-c", "commit.gpgsign=false", "commit", "-m", "Separate metadata baseline")
+        linked = self.root / "separate linked checkout"
+        self.git(primary, "worktree", "add", "-b", "linked", str(linked))
+        refs = self.git(primary, "show-ref")
+        expected = self.root / "separate checkout-features" / "separate"
+        fallback = self.root / "separate metadata-features"
+        with self.assertRaisesRegex(ValueError, "Pass the primary checkout as repo"):
+            workflow.initialize(linked, "separate", self.ticket, self.specification, self.approved)
+        self.assertFalse(expected.exists())
+        self.assertFalse(fallback.exists())
+        self.assertEqual(self.git(primary, "show-ref"), refs)
+        state = workflow.initialize(primary, "separate", self.ticket, self.specification, self.approved)
+        self.assertEqual(Path(state["feature_worktree"]), expected / "feature")
+        self.assertFalse(fallback.exists())
+
     def test_invalid_initialization_leaves_paths_and_refs_untouched(self):
         other = self.path.parent / "other"
         fallback = self.root / "arbitrary workspace"

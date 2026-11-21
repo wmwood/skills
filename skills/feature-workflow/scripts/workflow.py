@@ -81,7 +81,20 @@ def workspace_destination(repo, feature_id, workspace):
     primary = records[0].split("\0")
     require(primary[0].startswith("worktree ") and "bare" not in primary,
             "A primary Git checkout is required")
-    checkout = Path(primary[0][9:]).resolve()
+    git_dir, common_dir = git(repo, "rev-parse", "--path-format=absolute",
+                              "--git-dir", "--git-common-dir").splitlines()
+    # Git can report the metadata directory as the primary worktree when .git is stored separately.
+    checkout = repo
+    if Path(git_dir).resolve() != Path(common_dir).resolve():
+        checkout = Path(primary[0][9:]).resolve()
+        message = "Cannot verify the primary Git checkout. Pass the primary checkout as repo."
+        try:
+            top, primary_git_dir = git(checkout, "rev-parse", "--path-format=absolute",
+                                       "--show-toplevel", "--git-dir").splitlines()
+        except (OSError, ValueError) as error:
+            raise ValueError(message) from error
+        require(Path(top).resolve() == checkout and Path(primary_git_dir).resolve() == Path(common_dir).resolve(),
+                message)
     require(checkout.name, "Primary checkout must have a directory name")
     destination = checkout.with_name(checkout.name + "-features") / identifier(feature_id)
     require(workspace is None or Path(workspace) == destination,
@@ -92,16 +105,14 @@ def workspace_destination(repo, feature_id, workspace):
     for record in records:
         if record.startswith("worktree "):
             worktree = Path(record.split("\0", 1)[0][9:]).resolve()
-            require(not inside(destination, worktree) and not inside(worktree, destination),
+            require(not destination.is_relative_to(worktree) and not worktree.is_relative_to(destination),
                     "Workspace must be outside all repository worktrees")
-    # Also reject another repository, including ignored directories inside one.
-    probe = destination.parent
-    while not probe.exists():
-        probe = probe.parent
-    require(probe.is_dir(), f"Feature workspace ancestor must be a directory: {probe}")
-    result = subprocess.run(["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
-                            capture_output=True)
-    require(result.returncode != 0, "Workspace must be outside any Git checkout")
+    # Detect other checkouts even when Git discovery would refuse them due to ownership.
+    for ancestor in destination.parents:
+        require(not ancestor.exists() or ancestor.is_dir(),
+                f"Feature workspace ancestor must be a directory: {ancestor}")
+        marker = ancestor / ".git"
+        require(not marker.exists() and not marker.is_symlink(), "Workspace must be outside any Git checkout")
     return destination
 
 
