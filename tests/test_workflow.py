@@ -43,9 +43,9 @@ class WorkflowTests(unittest.TestCase):
         self.specification = self.root / "spec input.md"
         self.ticket.write_text("One feature: add independent outputs.\n", encoding="utf-8")
         self.specification.write_text("AC1: outputs exist.\n", encoding="utf-8")
-        self.path = self.root / "external workspace"
+        self.path = self.root / "original repo-features" / "sample"
         self.approved = {"human": "test human", "evidence": "test session explicit approval", "date": "2026-11-03"}
-        self.state = workflow.initialize(self.repo, self.path, "sample", self.ticket,
+        self.state = workflow.initialize(self.repo, "sample", self.ticket,
                                          self.specification, self.approved)
 
     def remove_test_directory(self):
@@ -117,25 +117,88 @@ class WorkflowTests(unittest.TestCase):
         (self.repo / "private untracked.txt").write_text("private\n", encoding="utf-8")
         before = (self.git(self.repo, "rev-parse", "HEAD"), self.git(self.repo, "status", "--porcelain"),
                   self.git(self.repo, "diff", "--cached"), self.git(self.repo, "diff"))
-        other = self.root / "another workspace"
-        state = workflow.initialize(self.repo, other, "other", self.ticket, self.specification, self.approved)
+        other = self.path.parent / "other"
+        state = workflow.initialize(self.repo, "other", self.ticket, self.specification, self.approved,
+                                    workspace=other)
         after = (self.git(self.repo, "rev-parse", "HEAD"), self.git(self.repo, "status", "--porcelain"),
                  self.git(self.repo, "diff", "--cached"), self.git(self.repo, "diff"))
         self.assertEqual(before, after)
         self.assertEqual(state["original"]["status"], before[1])
         self.assertEqual((other / "feature/tracked.txt").read_text(), "baseline\n")
 
-    def test_initialization_rejects_existing_nested_unapproved_and_missing_instructions(self):
-        for destination in (self.path, self.repo / "ignored workspace"):
-            with self.assertRaises(ValueError):
-                workflow.initialize(self.repo, destination, "other", self.ticket, self.specification, self.approved)
-        with self.assertRaises(ValueError):
-            workflow.initialize(self.repo, self.root / "unapproved", "other", self.ticket, self.specification, {})
+    def test_cli_derives_workspace_from_primary_checkout_when_called_from_linked_checkout(self):
+        checkout = self.state["feature_worktree"]
+        self.git(checkout, "commit", "--allow-empty", "-m", "Linked checkout baseline")
+        request = self.root / "init request.json"
+        request.write_text(json.dumps(dict(repo=checkout, feature_id="linked",
+                                           ticket=str(self.ticket), spec=str(self.specification),
+                                           approved=self.approved)), encoding="utf-8")
+        result = subprocess.run([sys.executable, str(HELPER), "init", "--request", str(request),
+                                 "--actor", "cli-session", "--role", "planner"], capture_output=True,
+                                text=True, encoding="utf-8", check=True)
+        state = json.loads(result.stdout)
+        expected = self.path.parent / "linked"
+        self.assertEqual(Path(state["feature_worktree"]), expected / "feature")
+        self.assertTrue((expected / "state.json").is_file())
+        self.assertEqual(state["base_commit"], self.git(checkout, "rev-parse", "HEAD"))
+
+    def test_invalid_initialization_leaves_paths_and_refs_untouched(self):
+        other = self.path.parent / "other"
+        fallback = self.root / "arbitrary workspace"
+        refs = self.git(self.repo, "show-ref")
+        with self.assertRaisesRegex(ValueError, "Feature workspace already exists"):
+            workflow.initialize(self.repo, "sample", self.ticket, self.specification, self.approved)
+        for destination in (fallback, self.repo / "ignored workspace"):
+            with self.subTest(destination=destination):
+                with self.assertRaisesRegex(ValueError, "Feature workspace must be"):
+                    workflow.initialize(self.repo, "other", self.ticket, self.specification,
+                                        self.approved, workspace=destination)
+                self.assertFalse(destination.exists())
+        with self.assertRaisesRegex(ValueError, "identifier"):
+            workflow.initialize(self.repo, "../other", self.ticket, self.specification, self.approved)
+        with self.assertRaisesRegex(ValueError, "approval"):
+            workflow.initialize(self.repo, "other", self.ticket, self.specification, {})
+        self.assertEqual(self.git(self.repo, "show-ref"), refs)
         self.git(self.repo, "rm", "GLOSSARY.md")
         self.git(self.repo, "commit", "-m", "Remove initialization")
-        with self.assertRaises(ValueError):
-            workflow.initialize(self.repo, self.root / "uninitialized", "other", self.ticket, self.specification, self.approved)
-        self.assertFalse((self.root / "uninitialized").exists())
+        refs = self.git(self.repo, "show-ref")
+        with self.assertRaisesRegex(ValueError, "GLOSSARY.md"):
+            workflow.initialize(self.repo, "other", self.ticket, self.specification, self.approved)
+        self.assertFalse(other.exists())
+        self.assertEqual(self.git(self.repo, "show-ref"), refs)
+
+    def test_initialization_rejects_target_under_another_git_checkout(self):
+        self.git(self.path.parent, "init", "-b", "main")
+        with self.assertRaisesRegex(ValueError, "outside any Git checkout"):
+            workflow.initialize(self.repo, "nested", self.ticket, self.specification, self.approved)
+        self.assertFalse((self.path.parent / "nested").exists())
+
+    def test_initialization_reports_denied_workspace_without_creating_refs(self):
+        destination = self.path.parent / "denied"
+        refs = self.git(self.repo, "show-ref")
+        with patch.object(Path, "mkdir", side_effect=PermissionError("sandbox denied")) as mkdir:
+            with self.assertRaisesRegex(ValueError, "Write access to required feature workspace denied") as error:
+                workflow.initialize(self.repo, "denied", self.ticket, self.specification, self.approved)
+        mkdir.assert_called_once_with(parents=True, exist_ok=False)
+        self.assertIn(str(destination), str(error.exception))
+        self.assertIn("sandbox denied", str(error.exception))
+        self.assertEqual(self.git(self.repo, "show-ref"), refs)
+        self.assertFalse(destination.exists())
+
+    def test_task_and_review_worktrees_are_under_the_feature_workspace(self):
+        self.add()
+        task_tree = self.implement()
+        self.assertEqual(task_tree, self.path / "tasks" / "first")
+        review_tree = self.path / "reviews" / "first-review"
+        review_branch = "codex/sample-review-first"
+        self.git(self.repo, "worktree", "add", "-b", review_branch, str(review_tree),
+                 self.read()["tasks"]["first"]["head"])
+        resource = dict(resource_id="first-review", kind="worktree", owner="reviewer-first",
+                        purpose="review", branch=review_branch, task_id="first")
+        with self.assertRaisesRegex(ValueError, "Review worktree must be under"):
+            self.invoke("register_resource", path=str(self.root / "outside"), **resource)
+        self.invoke("register_resource", path=str(review_tree), **resource)
+        self.assertEqual(self.read()["resources"]["first-review"]["path"], str(review_tree))
 
     def test_authority_dependencies_and_no_completion_without_review(self):
         self.add()

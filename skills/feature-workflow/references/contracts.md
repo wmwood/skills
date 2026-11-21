@@ -16,7 +16,9 @@ Library version: 1.1.0. State schema: 2. Skills install as sibling directories, 
 
 ## External workspace and artifacts
 
-Choose an absolute feature directory outside every repository worktree (default sibling directory named `<repository>-features/<feature-id>`); ensure Git cannot track it. Never put it in a checked-out tree even if ignored. Use distinct workspace per feature. Preserve original checkout branch, HEAD, status, index, and untracked files; never stash/reset/clean it. Read baseline from a committed ref; disclose that uncommitted changes are excluded.
+Every new feature workspace must be `<repo-parent>/<repo-name>-features/<feature-id>`. Use the parent and directory name of Git's primary checkout, even when working from a linked checkout. The helper must validate the required path before writing any files or creating Git refs. The destination must be new, outside all Git checkouts, and free of links or junctions that redirect it. If the required directory is outside the session's writable roots, request write access to that exact directory before running init. If access is denied, report the path and the denial and stop initialization.
+
+Keep the integration checkout at `feature/`, task worktrees at `tasks/<task-id>`, and review worktrees at `reviews/<review-id>` under the feature workspace. Keep durable evidence outside those checkout directories. Resume existing workspaces at their recorded paths. Preserve the original checkout's branch, HEAD, index, tracked edits, and untracked files. Read the baseline from a committed ref and disclose that uncommitted changes are excluded.
 
 Artifacts: immutable `ticket.md`; `specs/0001.md` then monotonic consolidated full specifications; `state.json`; append-only `decisions/`; `reports/` with unique generation/task/agent or attempt identifiers; `checkpoints/`; `pr.md`. No private feature data in the skill library. Each approval records human identity/session evidence, date, artifact digest, and approved revision. A proposed change is not approved by silence.
 

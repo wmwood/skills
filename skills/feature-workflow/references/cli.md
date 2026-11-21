@@ -4,11 +4,15 @@ Requires Python 3.10+ and Git. No service credentials, third-party modules, auto
 
 Each invocation takes one operation, `--request` pointing to a UTF-8 JSON object, `--actor` containing the unique agent/session ID, and `--role` containing planner or orchestrator. Operations other than init also require `--workspace` as an absolute path. All operation arguments come from the JSON object; unknown arguments fail. CLI success returns JSON and exit 0; failure returns a message on stderr and exit 1. A failure can leave an intentional checkpoint or reserved destination; inspect before retrying. Never simply delete it and restart.
 
+## Initialize
+
+The helper derives and validates the new path using the primary checkout and the [workspace contract](contracts.md#external-workspace-and-artifacts). Omit `--workspace` for init. A legacy `workspace` JSON field must match the derived path or init fails before creating files or refs. Request access to the required path when the session cannot write there. Report an access denial with the derived path and stop.
+
 ## Operations and JSON fields
 
 | Operation | Role | Required request fields |
 | --- | --- | --- |
-| init | planner | repo, workspace (new external absolute path), feature_id, ticket (source path), spec (source path), approved; optional base (committed ref, default HEAD) |
+| init | planner | repo (checkout path), feature_id, ticket (source path), spec (source path), approved. Optional base (committed ref, default HEAD in the supplied checkout). An older request may include workspace as an exact assertion of the derived absolute path. |
 | add-task | planner/orchestrator | task_id, depends_on (IDs already added), scope, acceptance_ids, tests (nonempty argument arrays) |
 | start-task | orchestrator | task_id, owner (unique implementer identity) |
 | submit | orchestrator | task_id; inspect committed worker result first |
@@ -19,7 +23,7 @@ Each invocation takes one operation, `--request` pointing to a UTF-8 JSON object
 | revise | orchestrator | spec (new full consolidated specification path), approved, affected_tasks (all affected unfinished IDs) |
 | gate | orchestrator | kind (validation/quality), report |
 | pr-ready | orchestrator | no fields; empty object; readiness only, no network call |
-| register-resource | orchestrator | resource_id, kind, owner, purpose; path/branch/task_id for worktrees, path for directories, docker_id for containers/networks |
+| register-resource | orchestrator | resource_id, kind, owner, purpose. Supply path/branch/task_id for worktrees, path for directories, or docker_id for containers/networks. Task and review worktrees must be direct children of the workspace's tasks and reviews directories, respectively. |
 | record-pr | orchestrator | url, head, base, evidence; optional merge_commit after inspecting merged PR service evidence |
 | cleanup-plan | orchestrator | resource_ids; stores concrete inventory and inventory_sha256, no approval or deletion |
 | cleanup-apply | orchestrator | authorized: human, evidence, date, feature_id, inventory_sha256 |
