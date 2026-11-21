@@ -76,37 +76,66 @@ def approval(value):
     return value
 
 
-def external(repo, path):
-    path = Path(path).resolve()
-    for line in git(repo, "worktree", "list", "--porcelain").splitlines():
-        if line.startswith("worktree "):
-            require(not inside(path, line[9:]), "Workspace must be outside all repository worktrees")
-    # Also reject another repository, including ignored directories inside one.
-    probe = path
-    while not probe.exists():
-        probe = probe.parent
-    result = subprocess.run(["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
-                            capture_output=True)
-    require(result.returncode != 0, "Workspace must be outside any Git checkout")
-    return path
+def workspace_destination(repo, feature_id, workspace):
+    records = git(repo, "worktree", "list", "--porcelain", "-z").split("\0\0")
+    primary = records[0].split("\0")
+    require(primary[0].startswith("worktree ") and "bare" not in primary,
+            "A primary Git checkout is required")
+    git_dir, common_dir = git(repo, "rev-parse", "--path-format=absolute",
+                              "--git-dir", "--git-common-dir").splitlines()
+    # Git can report the metadata directory as the primary worktree when .git is stored separately.
+    checkout = repo
+    if Path(git_dir).resolve() != Path(common_dir).resolve():
+        checkout = Path(primary[0][9:]).resolve()
+        message = "Cannot verify the primary Git checkout. Pass the primary checkout as repo."
+        try:
+            top, primary_git_dir = git(checkout, "rev-parse", "--path-format=absolute",
+                                       "--show-toplevel", "--git-dir").splitlines()
+        except (OSError, ValueError) as error:
+            raise ValueError(message) from error
+        require(Path(top).resolve() == checkout and Path(primary_git_dir).resolve() == Path(common_dir).resolve(),
+                message)
+    require(checkout.name, "Primary checkout must have a directory name")
+    destination = checkout.with_name(checkout.name + "-features") / identifier(feature_id)
+    require(workspace is None or Path(workspace) == destination,
+            f"Feature workspace must be {destination}")
+    require(destination.resolve() == destination, f"Linked feature workspace path: {destination}")
+    require(not destination.exists() and not destination.is_symlink(),
+            f"Feature workspace already exists: {destination}")
+    for record in records:
+        if record.startswith("worktree "):
+            worktree = Path(record.split("\0", 1)[0][9:]).resolve()
+            require(not destination.is_relative_to(worktree) and not worktree.is_relative_to(destination),
+                    "Workspace must be outside all repository worktrees")
+    # Detect other checkouts even when Git discovery would refuse them due to ownership.
+    for ancestor in destination.parents:
+        require(not ancestor.exists() or ancestor.is_dir(),
+                f"Feature workspace ancestor must be a directory: {ancestor}")
+        marker = ancestor / ".git"
+        require(not marker.exists() and not marker.is_symlink(), "Workspace must be outside any Git checkout")
+    return destination
 
 
-def new_worktree(repo, destination, branch, base):
-    require(not Path(destination).exists(), "Worktree destination already exists")
+def check_new_worktree(repo, destination, branch):
+    require(not destination.exists() and not destination.is_symlink(),
+            "Worktree destination already exists")
     git(repo, "check-ref-format", "--branch", branch)
     result = subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet",
                              "refs/heads/" + branch], capture_output=True)
     require(result.returncode == 1, "Branch exists or cannot be checked")
+
+
+def new_worktree(repo, destination, branch, base):
+    check_new_worktree(repo, destination, branch)
     git(repo, "worktree", "add", "-b", branch, str(destination), base)
 
 
-def initialize(repo, workspace, feature_id, ticket, spec, approved, base="HEAD"):
+def initialize(repo, feature_id, ticket, spec, approved, base="HEAD", workspace=None):
     repo = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
-    require(Path(workspace).is_absolute(), "Absolute workspace required")
-    workspace = external(repo, workspace)
-    identifier(feature_id)
+    workspace = workspace_destination(repo, feature_id, workspace)
     approval(approved)
-    require(not workspace.exists(), "Feature workspace already exists")
+    branch = "codex/" + feature_id
+    check_new_worktree(repo, workspace / "feature", branch)
     commit = git(repo, "rev-parse", "--verify", base + "^{commit}")
     for filename in ("AGENTS.md", "GLOSSARY.md"):
         git(repo, "cat-file", "-e", commit + ":" + filename)
@@ -114,13 +143,15 @@ def initialize(repo, workspace, feature_id, ticket, spec, approved, base="HEAD")
     ticket_bytes, spec_bytes = Path(ticket).read_bytes(), Path(spec).read_bytes()
     original = {"branch": git(repo, "rev-parse", "--abbrev-ref", "HEAD"),
                 "head": git(repo, "rev-parse", "HEAD"),
-                "status": git(repo, "status", "--porcelain=v1", "--untracked-files=all")}
-    workspace.mkdir(parents=True, exist_ok=False)
-    for name in ("specs", "reports", "decisions", "checkpoints", "tasks"):
+                "status": git(repo, "--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=all")}
+    try:
+        workspace.mkdir(parents=True, exist_ok=False)
+    except PermissionError as error:
+        raise ValueError(f"Write access to required feature workspace denied: {workspace}. {error}") from error
+    for name in ("specs", "reports", "decisions", "checkpoints", "tasks", "reviews"):
         (workspace / name).mkdir()
     (workspace / "ticket.md").write_bytes(ticket_bytes)
     (workspace / "specs/0001.md").write_bytes(spec_bytes)
-    branch = "codex/" + feature_id
     state = dict(schema_version=SCHEMA, library_version=VERSION, feature_id=feature_id,
                  repo=str(repo), original=original, feature_branch=branch,
                  feature_worktree=str(workspace / "feature"), base_commit=commit,
@@ -214,6 +245,7 @@ class Workspace:
         # Git cannot have both refs/heads/codex/x and codex/x/task.
         branch = "codex/" + self.state["feature_id"] + "-task-" + task_id
         destination = self.path / "tasks" / task_id
+        require(destination.resolve() == destination, f"Linked task worktree path: {destination}")
         self.state["resources"]["task-" + task_id] = dict(kind="worktree", path=str(destination),
             branch=branch, owner=owner, purpose="task", task_id=task_id, status="creating")
         atomic_json(self.path / "state.json", self.state)
@@ -446,6 +478,11 @@ class Workspace:
         require((kind in ("worktree", "directory") and path and Path(path).is_absolute()) or
                 (kind in ("container", "network") and docker_id and re.fullmatch(r"[a-f0-9]{64}", docker_id)),
                 "Exact absolute path or full Docker ID required")
+        if kind == "worktree" and purpose in ("task", "review"):
+            worktree = Path(path)
+            folder = "tasks" if purpose == "task" else "reviews"
+            require(worktree.parent == self.path / folder and worktree.resolve() == worktree,
+                    f"{purpose.capitalize()} worktree must be under {self.path / folder}")
         self.state["resources"][resource_id] = dict(kind=kind, owner=owner, purpose=purpose,
             path=path, branch=branch, task_id=task_id, docker_id=docker_id, status="present")
 
@@ -634,6 +671,7 @@ def main():
     try:
         request = json.loads(Path(args.request).read_text(encoding="utf-8-sig"))
         if args.operation == "init":
+            require(args.workspace is None, "Init derives its workspace; omit --workspace")
             require(args.role == "planner", "Initialization requires planner")
             require(args.actor, "Actor identity required")
             result = initialize(**request)
