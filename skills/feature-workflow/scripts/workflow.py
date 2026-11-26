@@ -274,7 +274,7 @@ class Workspace:
                 report.get("spec_revision") == self.state["spec_revision"], "Stale review")
         require(report.get("tests") and "findings" in report, "Review evidence required")
         require(report.get("verdict") in ("pass", "fail"), "Review verdict required")
-        self.save_report("review-" + task_id, report)
+        task["review_evidence"] = self.record_report("review-" + task_id, report)
         task["review"] = report
         task["status"] = "reviewed" if report["verdict"] == "pass" else "implementing"
 
@@ -294,6 +294,19 @@ class Workspace:
         require(not target.exists(), "Report exists; reconcile interrupted operation")
         atomic_json(target, report)
         return str(target)
+
+    def record_report(self, prefix, report):
+        path = Path(self.save_report(prefix, report))
+        return dict(file=path.name, sha256=digest(path), generation=self.state["generation"])
+
+    def preserved_report(self, evidence):
+        name = evidence["file"]
+        require(Path(name).name == name, "Unsafe worktree report path")
+        path = self.cleanup_path(self.path / "reports" / name)
+        require(path.is_file(), "Missing preserved worktree report")
+        data = path.read_bytes()
+        require(hashlib.sha256(data).hexdigest() == evidence["sha256"], "Worktree report changed")
+        return json.loads(data)
 
     def integrate(self, task_id, message):
         self.only("orchestrator")
@@ -468,7 +481,7 @@ class Workspace:
             self.state["lifecycle"] = "published"
 
     def register_resource(self, resource_id, kind, owner, purpose, path=None, branch=None,
-                          task_id=None, docker_id=None):
+                          task_id=None, docker_id=None, track_attempt=False):
         self.only("orchestrator")
         identifier(resource_id)
         require(resource_id not in self.state["resources"], "Resource already recorded")
@@ -483,13 +496,163 @@ class Workspace:
             folder = "tasks" if purpose == "task" else "reviews"
             require(worktree.parent == self.path / folder and worktree.resolve() == worktree,
                     f"{purpose.capitalize()} worktree must be under {self.path / folder}")
-        self.state["resources"][resource_id] = dict(kind=kind, owner=owner, purpose=purpose,
-            path=path, branch=branch, task_id=task_id, docker_id=docker_id, status="present")
+        require(type(track_attempt) is bool, "track_attempt must be a boolean")
+        resource = dict(kind=kind, owner=owner, purpose=purpose, path=path, branch=branch,
+                        task_id=task_id, docker_id=docker_id, status="present")
+        tracks_attempt = track_attempt or (kind == "worktree" and purpose in ("validation", "quality"))
+        if kind == "worktree":
+            self.verify_worktree_attempt_path(resource, tracks_attempt)
+        if tracks_attempt:
+            self.start_worktree_attempt(resource_id, resource)
+        self.state["resources"][resource_id] = resource
+
+    def verify_worktree_attempt_path(self, resource, tracks_attempt=False):
+        path = Path(resource["path"]).resolve()
+        for registered in self.state["resources"].values():
+            if (registered is resource or registered["kind"] != "worktree" or
+                    registered["status"] == "removed" or
+                    not (tracks_attempt or resource.get("attempt") or registered.get("attempt"))):
+                continue
+            other = Path(registered["path"]).resolve()
+            require(not (path.is_relative_to(other) or other.is_relative_to(path)),
+                    "Worktree attempt path overlaps a registered resource")
+
+    def start_worktree_attempt(self, resource_id, resource):
+        purpose, task_id = resource["purpose"], resource["task_id"]
+        require(resource["kind"] == "worktree" and purpose in ("review", "validation", "quality"),
+                "Only review, validation and quality worktrees can track an attempt")
+        path = self.cleanup_path(resource["path"])
+        head = self.cleanup_worktree_head(path, resource["branch"])
+        if purpose == "review":
+            task = self.state["tasks"][task_id]
+            require(task["status"] == "review" and head == task["head"] and
+                    resource["owner"] != task["owner"], "Worktree does not match the submitted review")
+        else:
+            require(path.relative_to(self.path).parts[0] not in
+                    ("specs", "reports", "decisions", "checkpoints", "tasks", "reviews", "planning"),
+                    "Gate worktree must be separate from durable evidence and task/review paths")
+            require(task_id is None and head == self.state["integrated_head"] and
+                    resource["owner"] not in {t["owner"] for t in self.state["tasks"].values()},
+                    "Worktree does not match the integrated feature head or independent gate owner")
+        resource["attempt"] = dict(resource_id=resource_id, purpose=purpose, owner=resource["owner"], path=resource["path"],
+            branch=resource["branch"], task_id=task_id, head=head, spec_revision=self.state["spec_revision"],
+            spec_sha256=self.state["spec_sha256"], report=None)
+
+    def finish_worktree_attempt(self, resource_id, report):
+        self.only("orchestrator")
+        resource = self.state["resources"][resource_id]
+        attempt = resource.get("attempt")
+        require(resource["status"] == "present" and attempt and attempt["report"] is None,
+                "No unfinished worktree attempt")
+        head = self.cleanup_worktree_head(self.cleanup_path(resource["path"]), resource["branch"])
+        self.verify_attempt_identity(resource, attempt, head)
+        self.verify_attempt_report(attempt, report)
+        attempt["report"] = self.record_report("attempt-" + resource_id, report)
+
+    def verify_attempt_identity(self, resource, attempt, head):
+        require(all(resource[k] == attempt[k] for k in ("purpose", "owner", "path", "branch", "task_id")) and
+                head == attempt["head"], "Worktree attempt identity changed")
+        spec = self.cleanup_path(self.path / "specs" / ("%04d.md" % attempt["spec_revision"]))
+        require(spec.is_file() and digest(spec) == attempt["spec_sha256"],
+                "Worktree attempt specification changed")
+
+    def verify_attempt_report(self, attempt, report):
+        require(isinstance(report, dict) and report.get("resource_id") == attempt["resource_id"] and
+                report.get("agent") == attempt["owner"] and
+                report.get("head") == attempt["head"] and report.get("spec_revision") == attempt["spec_revision"],
+                "Report does not match the worktree attempt ID, owner, head or revision")
+        if attempt["purpose"] == "review":
+            require(report.get("task_id") == attempt["task_id"] and
+                    report.get("verdict") in ("pass", "fail") and report.get("tests") and
+                    isinstance(report.get("findings"), list), "Report does not prove the review attempt")
+        else:
+            require(report.get("kind") == attempt["purpose"] and type(report.get("passed")) is bool and
+                    report.get("evidence"), "Report does not prove the gate attempt")
 
     def docker(self, *args):
         result = subprocess.run(["docker", *args], capture_output=True, text=True, encoding="utf-8")
         require(result.returncode == 0, result.stderr.strip() or "Docker operation failed")
         return result.stdout
+
+    def cleanup_path(self, value):
+        raw = Path(value)
+        path = raw.resolve()
+        require(raw.is_absolute() and path != self.path and inside(path, self.path) and
+                path != Path(self.state["repo"]).resolve(), "Unsafe cleanup path")
+        # Include Windows junctions and other reparse points in the link check.
+        for part in (raw, *raw.parents):
+            if part == self.path.parent:
+                break
+            require(not part.is_symlink() and not (part.exists() and
+                    getattr(part.lstat(), "st_file_attributes", 0) & 0x400), "Linked cleanup path")
+        return path
+
+    def cleanup_worktree_head(self, path, branch):
+        require(branch, "Worktree branch required")
+        listing = git(self.state["repo"], "worktree", "list", "--porcelain", "-z")
+        records = [block.split("\0") for block in listing.split("\0\0")]
+        require(any(lines[0].startswith("worktree ") and Path(lines[0][9:]).resolve() == path and
+                    "branch refs/heads/" + branch in lines for lines in records), "Worktree registration mismatch")
+        top, common = git(path, "rev-parse", "--path-format=absolute",
+                          "--show-toplevel", "--git-common-dir").splitlines()
+        expected_common = git(self.state["repo"], "rev-parse", "--path-format=absolute", "--git-common-dir")
+        require(Path(top).resolve() == path and Path(common).resolve() == Path(expected_common).resolve(),
+                "Worktree repository mismatch")
+        require(git(path, "symbolic-ref", "--short", "HEAD") == branch, "Worktree branch mismatch")
+        head = git(path, "rev-parse", "HEAD")
+        require(git(self.state["repo"], "rev-parse", "--verify", "refs/heads/" + branch) == head,
+                "Worktree branch tip changed")
+        return head
+
+    def inspect_worktree_evidence(self, resource, head):
+        purpose = resource["purpose"]
+        attempt = resource.get("attempt")
+        evidence = {}
+        if attempt or purpose in ("validation", "quality"):
+            require(attempt and attempt["report"], "Missing completed worktree attempt report")
+            self.verify_attempt_identity(resource, attempt, head)
+            report = self.preserved_report(attempt["report"])
+            self.verify_attempt_report(attempt, report)
+            evidence["attempt_report"] = attempt["report"]
+        if purpose in ("validation", "quality"):
+            return evidence
+        if purpose == "feature":
+            require(self.state["merge"] and head == self.state["merge"]["head"] and
+                    resource["path"] == self.state["feature_worktree"], "Feature requires verified PR merge")
+            return evidence
+        require(purpose in ("task", "review"), "Unknown worktree cleanup purpose")
+        task_id = resource["task_id"]
+        task = self.state["tasks"][task_id]
+        source_head = task["head"]
+        require(task["status"] == "complete" and (head == source_head or purpose == "review" and attempt),
+                "Unintegrated/changed source")
+        if purpose == "task":
+            require(resource["path"] == task["worktree"] and resource["branch"] == task["branch"] and
+                    resource["owner"] == task["owner"], "Task resource mismatch")
+        commit = task["integration_commit"]
+        proof = task.get("integration_evidence", {})
+        require(proof.get("source_head") == source_head and proof.get("commit") == commit and
+                proof.get("tests") and all(t["exit_code"] == 0 for t in proof["tests"]) and
+                git(self.state["repo"], "rev-parse", commit + "^") == proof.get("parent") and
+                git(self.state["repo"], "rev-parse", commit + "^{tree}") == proof.get("tree"),
+                "Missing recorded integration tree/check evidence")
+        git(self.state["repo"], "merge-base", "--is-ancestor", commit, self.state["integrated_head"])
+        message = git(self.state["repo"], "log", "-1", "--format=%B", commit).splitlines()
+        require("Source-Head: " + source_head in message and "Task: " + task_id in message and
+                "Feature: " + self.state["feature_id"] in message, "Missing squash integration evidence")
+        if attempt:
+            review = task.get("review")
+            recorded = task.get("review_evidence")
+            require(review and recorded and self.preserved_report(recorded) == review and
+                    review["head"] == source_head and review["verdict"] == "pass" and
+                    review["spec_revision"] == proof["spec_revision"] and
+                    "Spec-Revision: " + str(proof["spec_revision"]) in message,
+                    "Missing final review evidence for worktree attempt")
+            require((head == source_head and report == review) or
+                    (recorded["generation"] > attempt["report"]["generation"]),
+                    "No later review superseded the worktree attempt")
+            evidence["integrated_review"] = recorded
+        return evidence
 
     def inspect_resource(self, resource):
         r = dict(resource)
@@ -503,48 +666,16 @@ class Workspace:
             require(not data.get("State", {}).get("Running") and not data.get("Containers"),
                     "Running application or shared network retained")
             return r
-        raw = Path(r["path"])
-        path = raw.resolve()
-        require(raw.is_absolute() and path != self.path and inside(path, self.path) and
-                path != Path(self.state["repo"]).resolve(), "Unsafe cleanup path")
-        # Reject symlinks/junctions in any component, including Windows reparse points.
-        for part in (raw, *raw.parents):
-            if part == self.path.parent:
-                break
-            require(not part.is_symlink() and not (part.exists() and
-                    getattr(part.lstat(), "st_file_attributes", 0) & 0x400), "Linked cleanup path")
+        path = self.cleanup_path(r["path"])
         if r["kind"] == "directory":
             require(path.is_dir() and not any(path.iterdir()), "Unknown files retained; directory must be empty")
             return r
-        require(r.get("branch"), "Worktree branch required")
-        listing = git(self.state["repo"], "worktree", "list", "--porcelain")
-        records = [block.splitlines() for block in listing.split("\n\n")]
-        require(any(lines and lines[0].startswith("worktree ") and
-                    Path(lines[0][9:]).resolve() == path and
-                    "branch refs/heads/" + r["branch"] in lines for lines in records), "Worktree registration mismatch")
+        self.verify_worktree_attempt_path(resource)
+        head = self.cleanup_worktree_head(path, r["branch"])
         require(not git(path, "status", "--porcelain", "--untracked-files=all", "--ignored"), "Dirty/ignored files retained")
-        require(git(path, "symbolic-ref", "--short", "HEAD") == r["branch"], "Worktree branch mismatch")
-        head = git(path, "rev-parse", "HEAD")
-        if r["purpose"] == "feature":
-            require(self.state["merge"] and head == self.state["merge"]["head"] and
-                    r["path"] == self.state["feature_worktree"], "Feature requires verified PR merge")
-        else:
-            task = self.state["tasks"][r["task_id"]]
-            require(task["status"] == "complete" and head == task["head"], "Unintegrated/changed source")
-            if r["purpose"] == "task":
-                require(r["path"] == task["worktree"] and r["branch"] == task["branch"] and
-                        r["owner"] == task["owner"], "Task resource mismatch")
-            commit = task["integration_commit"]
-            proof = task.get("integration_evidence", {})
-            require(proof.get("source_head") == head and proof.get("commit") == commit and
-                    proof.get("tests") and all(t["exit_code"] == 0 for t in proof["tests"]) and
-                    git(self.state["repo"], "rev-parse", commit + "^") == proof.get("parent") and
-                    git(self.state["repo"], "rev-parse", commit + "^{tree}") == proof.get("tree"),
-                    "Missing recorded integration tree/check evidence")
-            git(self.state["repo"], "merge-base", "--is-ancestor", commit, self.state["integrated_head"])
-            message = git(self.state["repo"], "log", "-1", "--format=%B", commit).splitlines()
-            require("Source-Head: " + head in message and "Task: " + r["task_id"] in message and
-                    "Feature: " + self.state["feature_id"] in message, "Missing squash integration evidence")
+        evidence = self.inspect_worktree_evidence(r, head)
+        if evidence:
+            r["worktree_evidence"] = evidence
         r["head"] = head
         return r
 
@@ -577,7 +708,7 @@ class Workspace:
             try:
                 resource = self.state["resources"][item["resource_id"]]
                 require(all(resource.get(k) == v for k, v in snapshot.items()
-                            if k not in ("resource_id", "head")), "Resource inventory changed")
+                            if k not in ("resource_id", "head", "worktree_evidence")), "Resource inventory changed")
                 repo = self.state["repo"]
                 recovery_ref = "refs/feature-workflow/" + self.state["feature_id"] + "/" + item["resource_id"]
                 if resource["kind"] == "worktree":
@@ -587,7 +718,11 @@ class Workspace:
                         require(self.inspect_resource(resource) == {k: v for k, v in snapshot.items() if k != "resource_id"},
                                 "Inventory changed; create a new approved plan")
                     else:
+                        self.verify_worktree_attempt_path(resource)
                         require(git(repo, "rev-parse", recovery_ref) == snapshot["head"], "Missing recovery ref")
+                        if "worktree_evidence" in snapshot:
+                            require(self.inspect_worktree_evidence(resource, snapshot["head"]) ==
+                                    snapshot["worktree_evidence"], "Worktree evidence changed")
                     git(repo, "update-ref", recovery_ref, snapshot["head"])
                 elif item["status"] != "removing":
                     self.inspect_resource(resource)
@@ -662,7 +797,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=["init", "add-task", "start-task", "submit", "review", "return-task",
                         "integrate", "recover", "revise", "gate", "pr-ready", "record-pr", "register-resource",
-                        "cleanup-plan", "cleanup-apply", "cleanup-status"])
+                        "finish-worktree-attempt", "cleanup-plan", "cleanup-apply", "cleanup-status"])
     parser.add_argument("--request", required=True, help="UTF-8 JSON object of operation arguments")
     parser.add_argument("--workspace", help="Absolute external feature workspace (except init)")
     parser.add_argument("--actor", default="", help="Unique session/agent identity")

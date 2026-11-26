@@ -1,4 +1,5 @@
 """Integration tests use disposable local Git repositories; no network or live checkout edits."""
+import hashlib
 import importlib.util
 import json
 import os
@@ -509,6 +510,206 @@ class WorkflowTests(unittest.TestCase):
     def cleanup_approval(self, ids):
         plan = self.invoke("cleanup_plan", resource_ids=ids)
         return dict(self.approved, feature_id="sample", inventory_sha256=plan["inventory_sha256"])
+
+    def attempt(self, resource_id, purpose, head, owner, task_id=None):
+        folder = "reviews" if purpose == "review" else "gates"
+        tree = self.path / folder / resource_id
+        branch = "codex/sample-" + resource_id
+        self.git(self.repo, "worktree", "add", "-b", branch, str(tree), head)
+        self.invoke("register_resource", resource_id=resource_id, kind="worktree",
+                    owner=owner, purpose=purpose, path=str(tree), branch=branch,
+                    task_id=task_id, track_attempt=purpose == "review")
+        return tree
+
+    def attempt_report(self, resource_id, **changes):
+        attempt = self.read()["resources"][resource_id]["attempt"]
+        report = dict(resource_id=resource_id, agent=attempt["owner"], head=attempt["head"],
+                      spec_revision=attempt["spec_revision"])
+        if attempt["purpose"] == "review":
+            report.update(task_id=attempt["task_id"], verdict="fail", tests=["Checks completed"], findings=[])
+        else:
+            report.update(kind=attempt["purpose"], passed=False, evidence=["Checks completed"])
+        report.update(changes)
+        return report
+
+    def test_cleanup_accepts_failed_and_superseded_gate_worktrees_without_passing_gates(self):
+        head = self.finish()
+        for kind in ("validation", "quality"):
+            resource = kind + "-one"
+            self.attempt(resource, kind, head, "independent-" + kind)
+            report = self.attempt_report(resource, passed=kind == "validation")
+            self.invoke("finish_worktree_attempt", resource_id=resource, report=report)
+            self.gate(kind, passed=False)
+        self.specification.write_text("AC1: revised outputs exist.\n", encoding="utf-8")
+        self.invoke("revise", spec=str(self.specification), approved=self.approved, affected_tasks=[])
+        with self.assertRaisesRegex(ValueError, "Missing/stale validation gate"):
+            self.invoke("pr_ready")
+        authorized = self.cleanup_approval(["validation-one", "quality-one"])
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertEqual(set(result["removed"]), {"validation-one", "quality-one"})
+        self.assertEqual(result["blocked"], [])
+        self.assertEqual(self.read()["gates"], {})
+        for resource in ("validation-one", "quality-one"):
+            record = self.read()["resources"][resource]["attempt"]["report"]
+            self.assertTrue((self.path / "reports" / record["file"]).is_file())
+            self.assertEqual(self.git(self.repo, "rev-parse", "refs/feature-workflow/sample/" + resource), head)
+
+    def test_tracked_review_blocks_new_and_persisted_legacy_path_aliases(self):
+        self.add()
+        self.implement()
+        source = self.read()["tasks"]["first"]["head"]
+        resource_id = "tracked-review"
+        tree = self.attempt(resource_id, "review", source, "tracked-reviewer", task_id="first")
+        alias = dict(resource_id="legacy-alias", kind="worktree", owner="reviewer-first",
+                     purpose="review", path=str(tree), branch="codex/sample-tracked-review", task_id="first")
+        with self.assertRaisesRegex(ValueError, "overlaps a registered resource"):
+            self.invoke("register_resource", **alias)
+
+        self.review()
+        self.invoke("integrate", task_id="first", message="Add the reviewed first output")
+        state = self.read()
+        tracked = state["resources"].pop(resource_id)
+        workflow.atomic_json(self.path / "state.json", state)
+        self.invoke("register_resource", **alias)
+        authorized = self.cleanup_approval(["legacy-alias"])
+        # A previously persisted conflicting record cannot bypass attempt verification.
+        state = self.read()
+        state["resources"][resource_id] = tracked
+        workflow.atomic_json(self.path / "state.json", state)
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("overlaps a registered resource", result["blocked"][0]["error"])
+        self.assertTrue(tree.is_dir())
+        self.assertEqual(self.git(self.repo, "rev-parse", "refs/heads/" + alias["branch"]), source)
+
+    def test_gate_worktree_rejects_foreign_repository_at_same_branch_and_head(self):
+        head = self.finish()
+        resource = "quality-foreign"
+        branch = "codex/sample-quality-foreign"
+        tree = self.attempt(resource, "quality", head, "independent-quality")
+        self.invoke("finish_worktree_attempt", resource_id=resource, report=self.attempt_report(resource))
+        tree.rename(tree.with_name("displaced-checkout"))
+        tree.mkdir()
+        self.git(tree, "init", "-b", branch)
+        alternates = tree / ".git/objects/info/alternates"
+        alternates.write_text((self.repo / ".git/objects").as_posix() + "\n", encoding="utf-8", newline="\n")
+        self.git(tree, "update-ref", "refs/heads/" + branch, head)
+        self.git(tree, "read-tree", "--reset", "-u", "HEAD")
+        self.assertEqual(self.git(tree, "rev-parse", "HEAD"), head)
+        with self.assertRaisesRegex(ValueError, "repository mismatch"):
+            self.cleanup_approval([resource])
+
+    def test_gate_worktree_cleanup_requires_registered_matching_finished_attempt(self):
+        head = self.finish()
+        resource = "quality-one"
+        tree = self.attempt(resource, "quality", head, "independent-quality")
+        self.gate("quality")
+        with self.assertRaisesRegex(ValueError, "completed worktree attempt"):
+            self.cleanup_approval([resource])
+        report = self.attempt_report(resource)
+        for field, value in (("agent", "unrelated"), ("head", "0" * 40), ("spec_revision", 2),
+                             ("kind", "validation"), ("resource_id", "another-attempt")):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "attempt"):
+                self.invoke("finish_worktree_attempt", resource_id=resource, report=dict(report, **{field: value}))
+        self.invoke("finish_worktree_attempt", resource_id=resource, report=report)
+        authorized = self.cleanup_approval([resource])
+        path = self.path / "reports" / self.read()["resources"][resource]["attempt"]["report"]["file"]
+        saved = path.read_bytes()
+        path.unlink()
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("Missing preserved", result["blocked"][0]["error"])
+        path.write_bytes(saved + b" ")
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("report changed", result["blocked"][0]["error"])
+        path.write_bytes(saved)
+        self.git(tree, "commit", "--allow-empty", "-m", "Advance the gate checkout after approval")
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("attempt identity changed", result["blocked"][0]["error"])
+        self.git(tree, "update-ref", "refs/heads/codex/sample-quality-one", head)
+        self.git(tree, "checkout", "-b", "unrelated-worktree-branch")
+        self.assertTrue(self.invoke("cleanup_apply", authorized=authorized)["blocked"])
+        self.git(tree, "checkout", "codex/sample-quality-one")
+        self.assertFalse(self.invoke("cleanup_apply", authorized=authorized)["blocked"])
+
+    def test_superseded_review_cleanup_preserves_the_old_unintegrated_tip(self):
+        self.add()
+        task_tree = self.implement()
+        source = self.read()["tasks"]["first"]["head"]
+        old = "first-review-old"
+        old_tree = self.attempt(old, "review", source, "reviewer-old", task_id="first")
+        report = self.attempt_report(old)
+        with self.assertRaisesRegex(ValueError, "review attempt"):
+            self.invoke("finish_worktree_attempt", resource_id=old, report=dict(report, task_id="another"))
+        self.invoke("finish_worktree_attempt", resource_id=old, report=report)
+        self.invoke("review", task_id="first", report=report)
+        with self.assertRaisesRegex(ValueError, "Unintegrated"):
+            self.cleanup_approval([old])
+        (task_tree / "first.txt").write_text("review repair\n", encoding="utf-8")
+        self.git(task_tree, "add", "first.txt")
+        self.git(task_tree, "commit", "-m", "Revise first output after review")
+        self.invoke("submit", task_id="first")
+        final = self.read()["tasks"]["first"]["head"]
+        final_id = "first-review-final"
+        self.attempt(final_id, "review", final, "reviewer-final", task_id="first")
+        accepted = self.attempt_report(final_id, verdict="pass")
+        self.invoke("finish_worktree_attempt", resource_id=final_id, report=accepted)
+        self.invoke("review", task_id="first", report=accepted)
+        self.invoke("integrate", task_id="first", message="Add the reviewed first output")
+
+        authorized = self.cleanup_approval([old, final_id, "task-first"])
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertEqual(result["blocked"], [])
+        self.assertFalse(old_tree.exists())
+        self.assertEqual(self.git(self.repo, "rev-parse", "refs/feature-workflow/sample/" + old), source)
+        self.assertEqual(self.git(self.repo, "rev-parse", "refs/feature-workflow/sample/" + final_id), final)
+
+    def test_review_finished_after_integration_lacks_proof_of_supersession(self):
+        self.add()
+        self.implement()
+        source = self.read()["tasks"]["first"]["head"]
+        resource = "first-review-open"
+        self.attempt(resource, "review", source, "reviewer-open", task_id="first")
+        self.review()
+        self.invoke("integrate", task_id="first", message="Add the reviewed first output")
+        with self.assertRaisesRegex(ValueError, "completed worktree attempt"):
+            self.cleanup_approval([resource])
+        self.invoke("finish_worktree_attempt", resource_id=resource, report=self.attempt_report(resource))
+        with self.assertRaisesRegex(ValueError, "No later review"):
+            self.cleanup_approval([resource])
+
+    def test_pending_legacy_review_inventory_resumes_with_a_distinct_resource_owner(self):
+        self.finish()
+        state = self.read()
+        task = state["tasks"]["first"]
+        task.pop("review_evidence")
+        head = task["head"]
+        resource_id = "legacy-final"
+        tree = self.path / "reviews" / resource_id
+        branch = "codex/sample-legacy-final"
+        self.git(self.repo, "worktree", "add", "-b", branch, str(tree), head)
+
+        # Reconstruct the persisted schema-2 inventory from before attempt tracking.
+        resource = dict(kind="worktree", owner="review-worktree-coordinator", purpose="review",
+                        path=str(tree), branch=branch, task_id="first", docker_id=None, status="present")
+        self.assertNotEqual(resource["owner"], task["review"]["agent"])
+        state["resources"][resource_id] = resource
+        inventory = [dict(resource_id=resource_id, head=head, **resource)]
+        token = hashlib.sha256(json.dumps(inventory, sort_keys=True).encode()).hexdigest()
+        state["cleanup"] = dict(inventory=inventory, inventory_sha256=token,
+                                items=[dict(resource_id=resource_id, status="pending")])
+        authorized = dict(self.approved, feature_id="sample", inventory_sha256=token)
+        state["cleanup_authorization"] = authorized
+        workflow.atomic_json(self.path / "state.json", state)
+
+        private = tree / "private.txt"
+        private.write_text("retain until explicitly removed", encoding="utf-8")
+        blocked = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("Dirty/ignored", blocked["blocked"][0]["error"])
+        private.unlink()
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertEqual(result["removed"], [resource_id])
+        self.assertEqual(result["blocked"], [])
+        self.assertEqual(self.read()["cleanup"]["inventory"], inventory)
+        self.assertEqual(self.git(self.repo, "rev-parse", "refs/feature-workflow/sample/" + resource_id), head)
 
     def test_incremental_squash_cleanup_is_recoverable_and_repeatable(self):
         self.finish()
