@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -14,17 +15,62 @@ import tempfile
 VERSION = "1.1.0"
 SCHEMA = 2
 
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    class FindStreamData(ctypes.Structure):
+        _fields_ = [("size", ctypes.c_longlong), ("name", wintypes.WCHAR * (wintypes.MAX_PATH + 36))]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    find_first_stream = kernel32.FindFirstStreamW
+    find_first_stream.argtypes = (wintypes.LPCWSTR, ctypes.c_int, ctypes.POINTER(FindStreamData), wintypes.DWORD)
+    find_first_stream.restype = wintypes.HANDLE
+    find_next_stream = kernel32.FindNextStreamW
+    find_next_stream.argtypes = (wintypes.HANDLE, ctypes.POINTER(FindStreamData))
+    find_next_stream.restype = wintypes.BOOL
+    close_stream_search = kernel32.FindClose
+    close_stream_search.argtypes = (wintypes.HANDLE,)
+    close_stream_search.restype = wintypes.BOOL
+    INVALID_STREAM_HANDLE = ctypes.c_void_p(-1).value
+    ERROR_HANDLE_EOF = 38
+
 
 def require(condition, message):
     if not condition:
         raise ValueError(message)
 
 
-def git(repo, *args):
-    result = subprocess.run(["git", "-C", str(repo), *args], text=True,
-                            encoding="utf-8", capture_output=True)
-    require(result.returncode == 0, result.stderr.strip() or result.stdout.strip())
-    return result.stdout.strip()
+def verify_no_named_streams(path, is_directory):
+    """Require Windows to prove that this file or directory has no named data streams."""
+    if os.name != "nt":
+        return
+    filename = str(path)
+    if not filename.startswith("\\\\?\\"):
+        filename = ("\\\\?\\UNC\\" + filename[2:] if filename.startswith("\\\\")
+                    else "\\\\?\\" + filename)
+    data = FindStreamData()
+    handle = find_first_stream(filename, 0, ctypes.byref(data), 0)
+    if handle == INVALID_STREAM_HANDLE:
+        error = ctypes.get_last_error()
+        require(is_directory and error == ERROR_HANDLE_EOF,
+                f"Cannot verify Windows data streams for {path} (error {error})")
+        return
+    try:
+        require(not is_directory and data.name == "::$DATA", f"Named Windows data stream retained: {path}")
+        require(not find_next_stream(handle, ctypes.byref(data)), f"Named Windows data stream retained: {path}")
+        error = ctypes.get_last_error()
+        require(error == ERROR_HANDLE_EOF, f"Cannot verify Windows data streams for {path} (error {error})")
+    finally:
+        close_stream_search(handle)
+
+
+def git(repo, *args, raw=False):
+    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                            encoding=None if raw else "utf-8")
+    stdout, stderr = (os.fsdecode(result.stdout), os.fsdecode(result.stderr)) if raw else (result.stdout, result.stderr)
+    require(result.returncode == 0, stderr.strip() or stdout.strip())
+    return stdout if raw else stdout.strip()
 
 
 def digest(path):
@@ -501,21 +547,22 @@ class Workspace:
                         task_id=task_id, docker_id=docker_id, status="present")
         tracks_attempt = track_attempt or (kind == "worktree" and purpose in ("validation", "quality"))
         if kind == "worktree":
-            self.verify_worktree_attempt_path(resource, tracks_attempt)
+            self.verify_worktree_resource_path(resource, tracks_attempt)
         if tracks_attempt:
             self.start_worktree_attempt(resource_id, resource)
         self.state["resources"][resource_id] = resource
 
-    def verify_worktree_attempt_path(self, resource, tracks_attempt=False):
+    def verify_worktree_resource_path(self, resource, needs_evidence=False):
         path = Path(resource["path"]).resolve()
         for registered in self.state["resources"].values():
             if (registered is resource or registered["kind"] != "worktree" or
-                    registered["status"] == "removed" or
-                    not (tracks_attempt or resource.get("attempt") or registered.get("attempt"))):
+                    registered["status"] == "removed"):
                 continue
-            other = Path(registered["path"]).resolve()
-            require(not (path.is_relative_to(other) or other.is_relative_to(path)),
-                    "Worktree attempt path overlaps a registered resource")
+            evidence = any(r.get("attempt") or r.get("build_output") for r in (resource, registered))
+            if needs_evidence or evidence:
+                other = Path(registered["path"]).resolve()
+                require(not (path.is_relative_to(other) or other.is_relative_to(path)),
+                        "Worktree path overlaps a registered resource with cleanup evidence")
 
     def start_worktree_attempt(self, resource_id, resource):
         purpose, task_id = resource["purpose"], resource["task_id"]
@@ -654,6 +701,179 @@ class Workspace:
             evidence["integrated_review"] = recorded
         return evidence
 
+    def build_worktree_identity(self, resource_id, resource, head):
+        return dict(resource_id=resource_id, head=head, **{
+            key: resource[key] for key in ("path", "branch", "owner", "purpose", "task_id")
+        })
+
+    def output_directories(self, path, directories):
+        require(isinstance(directories, list) and directories, "Declare worktree-relative output directories")
+        roots = []
+        for value in directories:
+            require(isinstance(value, str) and value, "Invalid output directory path")
+            relative = Path(value)
+            require(not relative.anchor and relative.parts and all(
+                part != ".." and part.casefold() != ".git" and ":" not in part for part in relative.parts
+            ), "Unsafe output directory path")
+            root = self.cleanup_path(path / relative)
+            require(root.is_relative_to(path) and root != path and
+                    not any(root.is_relative_to(other) or other.is_relative_to(root) for other in roots),
+                    "Output directories must be distinct and inside the worktree")
+            roots.append(root)
+        return sorted(roots)
+
+    def verify_output_tracked_state(self, path, roots):
+        require(not git(path, "-c", "core.fsmonitor=false", "status", "--porcelain=v1",
+                        "--untracked-files=no", "--ignore-submodules=none"), "Tracked or staged worktree changes")
+        index = git(path, "ls-files", "-v", "-z", raw=True).split("\0")[:-1]
+        require(all(entry[0] != "S" and not entry[0].islower() for entry in index),
+                "Index flags can conceal tracked worktree changes")
+        tracked_paths = [path / entry[2:] for entry in index]
+        require(not any(tracked.is_relative_to(root) or root.is_relative_to(tracked)
+                        for tracked in tracked_paths for root in roots),
+                "Output directory overlaps a tracked worktree path")
+
+    @staticmethod
+    def output_file_state(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def output_entries(self, path, roots):
+        """Read exact contents of declared roots, including empty directories."""
+        entries = {}
+        pending = [root for root in roots if os.path.lexists(root)]
+        while pending:
+            entry = pending.pop()
+            relative = entry.relative_to(path).as_posix()
+            require(entry.name.casefold() != ".git" and ":" not in entry.name, "Unsafe output entry path")
+            found = entry.lstat()
+            require(not (stat.S_ISLNK(found.st_mode) or
+                         getattr(found, "st_file_attributes", 0) & 0x400 or
+                         os.path.ismount(entry)), "Linked output entry")
+            require(found.st_ino != 0, "Output entry has no stable filesystem identity")
+            identity = [found.st_dev, found.st_ino, found.st_mode]
+            if stat.S_ISDIR(found.st_mode):
+                verify_no_named_streams(entry, is_directory=True)
+                pending.extend(entry.iterdir())
+                entries[relative] = dict(kind="directory", identity=identity)
+                continue
+            require(stat.S_ISREG(found.st_mode) and found.st_nlink == 1, "Unsafe or linked output file")
+            verify_no_named_streams(entry, is_directory=False)
+            # Identify replaced files even when the replacement has the same contents.
+            expected = self.output_file_state(found)
+            with entry.open("rb") as stream:
+                opened = self.output_file_state(os.fstat(stream.fileno()))
+                # Windows can report different change times through pathname and handle APIs.
+                matches = opened[:-1] == expected[:-1] if os.name == "nt" else opened == expected
+                require(matches, "Output file changed during inspection")
+                sha256 = hashlib.sha256()
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    sha256.update(block)
+                require(self.output_file_state(os.fstat(stream.fileno())) == opened,
+                        "Output file changed during inspection")
+            require(self.output_file_state(entry.lstat()) == expected, "Output file changed during inspection")
+            entries[relative] = dict(kind="file", identity=identity, size=found.st_size,
+                                     mtime_ns=found.st_mtime_ns, ctime_ns=found.st_ctime_ns,
+                                     sha256=sha256.hexdigest())
+        return dict(sorted(entries.items()))
+
+    def record_build_output(self, resource_id, directories, command):
+        self.only("orchestrator")
+        require(not self.state["integration"], "Recovery evidence still needed")
+        require(isinstance(command, list) and command and command[0] and
+                all(isinstance(arg, str) and "\0" not in arg for arg in command),
+                "Build command must be a nonempty argument array")
+        resource = self.state["resources"][resource_id]
+        require(resource["kind"] == "worktree" and resource["status"] == "present",
+                "Build evidence requires a present registered worktree")
+        self.verify_worktree_resource_path(resource, needs_evidence=True)
+        path = self.cleanup_path(resource["path"])
+        head = self.cleanup_worktree_head(path, resource["branch"])
+        roots = self.output_directories(path, directories)
+        self.verify_output_tracked_state(path, roots)
+        before = self.output_entries(path, roots)
+        # A pre-existing file outside the snapshot could otherwise be moved into a declared root.
+        self.verify_untracked_output(path, before)
+        build = subprocess.run(command, cwd=path, stdin=subprocess.DEVNULL, capture_output=True, timeout=600)
+        require(build.returncode == 0, f"Build command failed with exit code {build.returncode}")
+        require(self.cleanup_path(resource["path"]) == path and
+                self.cleanup_worktree_head(path, resource["branch"]) == head, "Build changed the worktree identity")
+        after_roots = self.output_directories(path, directories)
+        require(after_roots == roots, "Build changed the output directories")
+        self.verify_output_tracked_state(path, after_roots)
+        after = self.output_entries(path, after_roots)
+        self.verify_untracked_output(path, after)
+        identity = self.build_worktree_identity(resource_id, resource, head)
+        evidence = resource.get("build_output") or {}
+        reports = evidence["reports"] if evidence.get("head") == head else []
+        report = self.record_report("build-output-" + resource_id, dict(
+            worktree=identity, directories=[root.relative_to(path).as_posix() for root in after_roots],
+            before=before, after=after, command=command, exit_code=build.returncode))
+        resource["build_output"] = dict(resource_id=resource_id, head=head, reports=[*reports, report])
+        return report
+
+    def build_output_inventory(self, resource, head):
+        evidence = resource["build_output"]
+        resource_id = evidence["resource_id"]
+        require(self.state["resources"].get(resource_id) is resource and evidence["head"] == head and
+                evidence["reports"], "Build evidence does not match the registered worktree tip")
+        identity = self.build_worktree_identity(resource_id, resource, head)
+        verified = {}
+        for record in evidence["reports"]:
+            report = self.preserved_report(record)
+            require(report["worktree"] == identity and report["exit_code"] == 0,
+                    "Build report does not match the registered worktree")
+            before = {Path(name): entry for name, entry in report["before"].items()}
+            before_objects = {tuple(entry["identity"][:2]): name for name, entry in before.items()}
+            previous = {Path(name): entry for name, entry in verified.items()}
+            verified = {}
+            for name, entry in report["after"].items():
+                # Both the old path and the same filesystem object can carry unknown content.
+                old_path = before_objects.get(tuple(entry["identity"][:2]))
+                sources = {Path(name), old_path} & before.keys()
+                if all(previous.get(path) == before[path] for path in sources):
+                    verified[name] = entry
+        entries = report["after"]
+        require(all(name in verified for name, entry in entries.items() if entry["kind"] == "file"),
+                "Unknown files retained inside declared output directories")
+        return dict(directories=report["directories"], entries=entries, generated=sorted(verified))
+
+    def verify_untracked_output(self, path, entries):
+        files = {Path(name) for name, entry in entries.items() if entry["kind"] == "file"}
+        others = git(path, "ls-files", "--others", "-z", raw=True).split("\0")[:-1]
+        require({Path(name) for name in others} == files, "Unverified untracked or ignored files retained")
+        self.verify_remaining_worktree_streams(path, entries)
+
+    def verify_remaining_worktree_streams(self, path, entries):
+        if os.name != "nt":
+            return
+        # Output entries have already been checked, including their declared directory roots.
+        checked = {path / name for name in entries}
+        pending = [path]
+        while pending:
+            candidate = pending.pop()
+            if candidate in checked:
+                continue
+            info = candidate.lstat()
+            require(not (stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) &
+                         stat.FILE_ATTRIBUTE_REPARSE_POINT), "Linked Windows worktree path retained")
+            directory = stat.S_ISDIR(info.st_mode)
+            require(directory or stat.S_ISREG(info.st_mode), "Unsupported Windows worktree entry")
+            if candidate.name.casefold() == ".git":
+                require(candidate == path / ".git" and not directory, "Unexpected Git metadata in worktree")
+            verify_no_named_streams(candidate, is_directory=directory)
+            if directory:
+                pending.extend(candidate.iterdir())
+
+    def inspect_build_output(self, resource, path, head):
+        inventory = self.build_output_inventory(resource, head)
+        roots = self.output_directories(path, inventory["directories"])
+        self.verify_output_tracked_state(path, roots)
+        entries = self.output_entries(path, roots)
+        require(entries == inventory["entries"], "Build output contents changed; record a new build")
+        self.verify_untracked_output(path, entries)
+        return inventory
+
     def inspect_resource(self, resource):
         r = dict(resource)
         require(not self.state["integration"], "Recovery evidence still needed")
@@ -670,9 +890,14 @@ class Workspace:
         if r["kind"] == "directory":
             require(path.is_dir() and not any(path.iterdir()), "Unknown files retained; directory must be empty")
             return r
-        self.verify_worktree_attempt_path(resource)
+        self.verify_worktree_resource_path(resource)
         head = self.cleanup_worktree_head(path, r["branch"])
-        require(not git(path, "status", "--porcelain", "--untracked-files=all", "--ignored"), "Dirty/ignored files retained")
+        if r.get("build_output"):
+            r["output_inventory"] = self.inspect_build_output(resource, path, head)
+        else:
+            require(not git(path, "status", "--porcelain", "--untracked-files=all", "--ignored"),
+                    "Dirty/ignored files retained")
+            self.verify_remaining_worktree_streams(path, {})
         evidence = self.inspect_worktree_evidence(r, head)
         if evidence:
             r["worktree_evidence"] = evidence
@@ -708,7 +933,10 @@ class Workspace:
             try:
                 resource = self.state["resources"][item["resource_id"]]
                 require(all(resource.get(k) == v for k, v in snapshot.items()
-                            if k not in ("resource_id", "head", "worktree_evidence")), "Resource inventory changed")
+                            if k not in ("resource_id", "head", "worktree_evidence", "output_inventory")),
+                        "Resource inventory changed")
+                require(not snapshot.get("output_inventory", {}).get("entries"),
+                        "Verified build output requires guarded removal")
                 repo = self.state["repo"]
                 recovery_ref = "refs/feature-workflow/" + self.state["feature_id"] + "/" + item["resource_id"]
                 if resource["kind"] == "worktree":
@@ -718,7 +946,7 @@ class Workspace:
                         require(self.inspect_resource(resource) == {k: v for k, v in snapshot.items() if k != "resource_id"},
                                 "Inventory changed; create a new approved plan")
                     else:
-                        self.verify_worktree_attempt_path(resource)
+                        self.verify_worktree_resource_path(resource)
                         require(git(repo, "rev-parse", recovery_ref) == snapshot["head"], "Missing recovery ref")
                         if "worktree_evidence" in snapshot:
                             require(self.inspect_worktree_evidence(resource, snapshot["head"]) ==
@@ -797,7 +1025,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=["init", "add-task", "start-task", "submit", "review", "return-task",
                         "integrate", "recover", "revise", "gate", "pr-ready", "record-pr", "register-resource",
-                        "finish-worktree-attempt", "cleanup-plan", "cleanup-apply", "cleanup-status"])
+                        "finish-worktree-attempt", "record-build-output", "cleanup-plan", "cleanup-apply",
+                        "cleanup-status"])
     parser.add_argument("--request", required=True, help="UTF-8 JSON object of operation arguments")
     parser.add_argument("--workspace", help="Absolute external feature workspace (except init)")
     parser.add_argument("--actor", default="", help="Unique session/agent identity")

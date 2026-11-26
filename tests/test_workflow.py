@@ -705,11 +705,340 @@ class WorkflowTests(unittest.TestCase):
         blocked = self.invoke("cleanup_apply", authorized=authorized)
         self.assertIn("Dirty/ignored", blocked["blocked"][0]["error"])
         private.unlink()
+        if os.name == "nt":
+            stream = Path(str(tree / "first.txt") + ":unrecorded")
+            stream.write_bytes(b"retain legacy checkout data")
+            try:
+                blocked = self.invoke("cleanup_apply", authorized=authorized)
+                self.assertIn("Named Windows data stream retained", blocked["blocked"][0]["error"])
+                self.assertEqual(stream.read_bytes(), b"retain legacy checkout data")
+            finally:
+                stream.unlink()
         result = self.invoke("cleanup_apply", authorized=authorized)
         self.assertEqual(result["removed"], [resource_id])
         self.assertEqual(result["blocked"], [])
         self.assertEqual(self.read()["cleanup"]["inventory"], inventory)
         self.assertEqual(self.git(self.repo, "rev-parse", "refs/feature-workflow/sample/" + resource_id), head)
+
+    def build_output(self, resource_id, directories, source):
+        return self.invoke("record_build_output", resource_id=resource_id, directories=directories,
+                           command=[sys.executable, "-c", "from pathlib import Path\n" + source])
+
+    def test_build_output_inventory_records_exact_ignored_and_untracked_contents(self):
+        head = self.finish()
+        resource_id = "validation-build"
+        tree = self.attempt(resource_id, "validation", head, "independent-validation")
+        exclude = self.repo / ".git/info/exclude"
+        exclude.write_text("ignored output/\n", encoding="utf-8")
+        reference = self.build_output(resource_id, ["plain output", "ignored output"], """
+Path("plain output").mkdir()
+Path("plain output/file with spaces").write_bytes(b"plain")
+Path("ignored output/nested/empty").mkdir(parents=True)
+Path("ignored output/nested/result").write_bytes(b"ignored")
+""")
+        with self.assertRaisesRegex(ValueError, "completed worktree attempt"):
+            self.cleanup_approval([resource_id])
+        self.invoke("finish_worktree_attempt", resource_id=resource_id, report=self.attempt_report(resource_id))
+        report_path = self.path / "reports" / reference["file"]
+        self.assertEqual(workflow.digest(report_path), reference["sha256"])
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["worktree"]["head"], head)
+        self.assertEqual(report["worktree"]["path"], str(tree))
+        self.assertEqual(report["worktree"]["resource_id"], resource_id)
+        self.assertEqual(report["before"], {})
+        self.assertEqual(report["exit_code"], 0)
+
+        authorized = self.cleanup_approval([resource_id])
+        snapshot = self.read()["cleanup"]["inventory"][0]
+        self.assertEqual(snapshot["build_output"]["reports"], [reference])
+        inventory = snapshot["output_inventory"]
+        self.assertEqual(inventory["directories"], ["ignored output", "plain output"])
+        self.assertEqual(inventory["entries"], report["after"])
+        self.assertEqual(inventory["generated"], [
+            "ignored output", "ignored output/nested", "ignored output/nested/empty",
+            "ignored output/nested/result", "plain output", "plain output/file with spaces",
+        ])
+        file_proof = inventory["entries"]["ignored output/nested/result"]
+        self.assertEqual(file_proof["size"], len(b"ignored"))
+        self.assertEqual(file_proof["sha256"], hashlib.sha256(b"ignored").hexdigest())
+        self.assertEqual(inventory["entries"]["ignored output/nested/empty"]["kind"], "directory")
+
+    def test_build_output_carries_only_verified_files_across_builds(self):
+        self.finish()
+        resource_id = "task-first"
+        root = self.path / "tasks/first"
+        self.build_output(resource_id, ["generated"], """
+Path("generated").mkdir()
+Path("generated/verified").write_bytes(b"first")
+""")
+        self.build_output(resource_id, ["generated"], """
+Path("generated/verified").rename("generated/moved verified")
+Path("generated/verified").write_bytes(b"rebuilt")
+Path("generated/second").write_bytes(b"second")
+""")
+        with workflow.Workspace(self.path, "coordinator-session", "orchestrator").transaction() as workspace:
+            resource = workspace.state["resources"][resource_id]
+            output = workspace.inspect_resource(resource)["output_inventory"]
+        self.assertEqual(output["generated"], [
+            "generated", "generated/moved verified", "generated/second", "generated/verified",
+        ])
+        self.assertEqual(output["entries"]["generated/moved verified"]["sha256"], hashlib.sha256(b"first").hexdigest())
+        self.assertEqual(output["entries"]["generated/verified"]["sha256"], hashlib.sha256(b"rebuilt").hexdigest())
+
+        unknown = root / "generated/private"
+        unknown.write_bytes(b"private before a later build")
+        for _ in range(2):
+            self.build_output(resource_id, ["generated"], """
+Path("generated/private").write_bytes(b"overwritten but not attributable")
+Path("generated/verified").write_bytes(b"rebuilt")
+""")
+            with self.assertRaisesRegex(ValueError, "Unknown files retained inside"):
+                self.cleanup_approval([resource_id])
+        self.assertTrue(unknown.exists())
+        self.build_output(resource_id, ["generated"], """
+Path("generated/private").rename("generated/renamed private")
+""")
+        with self.assertRaisesRegex(ValueError, "Unknown files retained inside"):
+            self.cleanup_approval([resource_id])
+        self.build_output(resource_id, ["generated"], """
+Path("generated/renamed private").unlink()
+Path("generated/renamed private").write_bytes(b"new inode, same unknown path")
+""")
+        with self.assertRaisesRegex(ValueError, "Unknown files retained inside"):
+            self.cleanup_approval([resource_id])
+
+    def test_build_output_blocks_unknown_changed_or_replaced_output(self):
+        self.finish()
+        resource_id = "task-first"
+        tree = self.path / "tasks/first"
+        result = tree / "generated/result"
+        self.build_output(resource_id, ["generated"], """
+Path("generated").mkdir()
+Path("generated/result").write_bytes(b"original")
+""")
+
+        exclude = self.repo / ".git/info/exclude"
+        exclude.write_text("outside ignored\n", encoding="utf-8")
+        outside = tree / "outside ignored"
+        outside.write_bytes(b"keep")
+        with self.assertRaisesRegex(ValueError, "Unverified untracked or ignored files"):
+            self.cleanup_approval([resource_id])
+        outside.unlink()
+
+        nested = tree / "generated/manual addition"
+        nested.mkdir()
+        (nested / "private").write_bytes(b"keep")
+        with self.assertRaisesRegex(ValueError, "Build output contents changed"):
+            self.cleanup_approval([resource_id])
+        (nested / "private").unlink()
+        nested.rmdir()
+
+        for name in ("outside untracked", "outside ignored"):
+            with self.subTest(outside=name):
+                untouched = tree / name
+                untouched.write_bytes(b"may not move unverified contents into the recorded root")
+                with self.assertRaisesRegex(ValueError, "Unverified untracked or ignored"):
+                    self.build_output(resource_id, ["generated"], f"""
+Path({name!r}).rename("generated/moved outside file")
+""")
+                self.assertTrue(untouched.is_file())
+                self.assertFalse((tree / "generated/moved outside file").exists())
+                untouched.unlink()
+
+        saved = self.root / "original output file"
+        result.rename(saved)
+        result.write_bytes(saved.read_bytes())
+        with self.assertRaisesRegex(ValueError, "Build output contents changed"):
+            self.cleanup_approval([resource_id])
+
+    def test_build_output_rejects_failed_builds_tracked_edits_and_unsafe_paths(self):
+        self.finish()
+        resource_id = "task-first"
+        tree = self.path / "tasks/first"
+        build = dict(resource_id=resource_id, directories=["generated"],
+                     command=[sys.executable, "-c", """
+from pathlib import Path
+Path("generated").mkdir()
+Path("generated/leftover").write_bytes(b"unverified")
+raise SystemExit(17)
+"""])
+        with self.assertRaisesRegex(ValueError, "Operation requires role"):
+            self.invoke("record_build_output", role="planner", **build)
+        with self.assertRaisesRegex(ValueError, "Build command failed with exit code 17"):
+            self.invoke("record_build_output", **build)
+        self.assertNotIn("build_output", self.read()["resources"][resource_id])
+        self.assertFalse(list((self.path / "reports").glob("build-output-*")))
+        with self.assertRaisesRegex(ValueError, "Dirty/ignored"):
+            self.cleanup_approval([resource_id])
+
+        for directories in (["../escape"], [str(tree / "generated")], [".git"],
+                            ["generated", "generated/nested"], ["generated", "generated"]):
+            with self.subTest(directories=directories), self.assertRaisesRegex(
+                    ValueError, "Unsafe output directory|Output directories must be distinct"):
+                self.build_output(resource_id, directories, "raise SystemExit('must not run')")
+        with self.assertRaisesRegex(ValueError, "Output directory overlaps a tracked"):
+            self.build_output(resource_id, ["tracked.txt"], "raise SystemExit('must not run')")
+
+        (tree / "tracked.txt").write_bytes(b"modified")
+        with self.assertRaisesRegex(ValueError, "Tracked or staged"):
+            self.build_output(resource_id, ["generated"], "raise SystemExit('must not run')")
+        self.git(tree, "add", "--", "tracked.txt")
+        with self.assertRaisesRegex(ValueError, "Tracked or staged"):
+            self.build_output(resource_id, ["generated"], "raise SystemExit('must not run')")
+        self.git(tree, "restore", "--source=HEAD", "--staged", "--worktree", "--", "tracked.txt")
+
+        self.git(tree, "update-index", "--assume-unchanged", "--", "tracked.txt")
+        (tree / "tracked.txt").write_bytes(b"hidden tracked edit")
+        with self.assertRaisesRegex(ValueError, "Index flags can conceal"):
+            self.build_output(resource_id, ["generated"], "raise SystemExit('must not run')")
+
+    def test_build_output_rejects_links_within_declared_directories(self):
+        self.finish()
+        resource_id = "task-first"
+        tree = self.path / "tasks/first"
+        preserve = self.root / "untouched outside"
+        preserve.write_bytes(b"outside")
+        with self.assertRaisesRegex(ValueError, "linked output file"):
+            self.build_output(resource_id, ["generated"], f"""
+import os
+Path("generated").mkdir()
+os.link({str(preserve)!r}, "generated/hard link")
+""")
+        self.assertEqual(preserve.read_bytes(), b"outside")
+        self.assertNotIn("build_output", self.read()["resources"][resource_id])
+
+        (tree / "generated/hard link").unlink()
+        if os.name == "nt":
+            subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", "linked-root", str(self.root)],
+                           cwd=tree, capture_output=True, check=True)
+            self.addCleanup(lambda: (tree / "linked-root").rmdir())
+        else:
+            (tree / "linked-root").symlink_to(self.root, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "Unsafe cleanup path|Linked cleanup path"):
+            self.build_output(resource_id, ["linked-root"], "raise SystemExit('must not run')")
+
+    def test_build_output_requires_durable_evidence_and_same_checkout_head(self):
+        head = self.finish()
+        resource_id = "validation-build"
+        tree = self.attempt(resource_id, "validation", head, "independent-validation")
+        reference = self.build_output(resource_id, ["generated"], """
+Path("generated").mkdir()
+Path("generated/result").write_bytes(b"verified")
+""")
+        self.invoke("finish_worktree_attempt", resource_id=resource_id, report=self.attempt_report(resource_id))
+        path = self.path / "reports" / reference["file"]
+        saved = path.read_bytes()
+        path.write_bytes(saved + b" ")
+        with self.assertRaisesRegex(ValueError, "report changed"):
+            self.cleanup_approval([resource_id])
+        path.unlink()
+        with self.assertRaisesRegex(ValueError, "Missing preserved"):
+            self.cleanup_approval([resource_id])
+        path.write_bytes(saved)
+        self.git(tree, "commit", "--allow-empty", "-m", "Move validation checkout beyond the recorded build")
+        with self.assertRaisesRegex(ValueError, "Build evidence does not match"):
+            self.cleanup_approval([resource_id])
+
+    @unittest.skipUnless(os.name == "nt", "Windows named stream behavior")
+    def test_windows_named_streams_block_directory_and_file_output(self):
+        self.finish()
+        resource_id = "task-first"
+        tree = self.path / "tasks/first"
+        self.build_output(resource_id, ["generated"], """
+Path("generated").mkdir()
+Path("generated/result").write_bytes(b"verified default stream")
+""")
+        for relative in ("generated", "generated/result"):
+            with self.subTest(path=relative):
+                stream = Path(str(tree / relative) + ":unrecorded")
+                stream.write_bytes(b"preserve separately authored data")
+                try:
+                    with self.assertRaisesRegex(ValueError, "Named Windows data stream retained"):
+                        self.cleanup_approval([resource_id])
+                    with self.assertRaisesRegex(ValueError, "Named Windows data stream retained"):
+                        self.build_output(resource_id, ["generated"], "raise SystemExit('must not run')")
+                    self.assertEqual(stream.read_bytes(), b"preserve separately authored data")
+                finally:
+                    stream.unlink()
+
+        with self.assertRaisesRegex(ValueError, "Named Windows data stream retained"):
+            self.build_output(resource_id, ["generated"], """
+Path("generated/result:added by build").write_bytes(b"not inventoried")
+""")
+        self.assertEqual(len(self.read()["resources"][resource_id]["build_output"]["reports"]), 1)
+
+    @unittest.skipUnless(os.name == "nt", "Windows named stream behavior")
+    def test_windows_named_streams_block_approved_empty_output_cleanup(self):
+        self.finish()
+        resource_id = "task-first"
+        tree = self.path / "tasks/first"
+        (tree / "outside empty").mkdir()
+        self.build_output(resource_id, ["generated"], "pass")
+        authorized = self.cleanup_approval([resource_id])
+        self.assertEqual(self.read()["cleanup"]["inventory"][0]["output_inventory"]["entries"], {})
+
+        for entry in (tree, tree / "tracked.txt", tree / "outside empty", tree / ".git"):
+            with self.subTest(path=entry.name):
+                stream = Path(str(entry) + ":unrecorded")
+                stream.write_bytes(b"retain")
+                try:
+                    result = self.invoke("cleanup_apply", authorized=authorized)
+                    self.assertEqual(result["removed"], [])
+                    self.assertIn("Named Windows data stream retained", result["blocked"][0]["error"])
+                    self.assertEqual(stream.read_bytes(), b"retain")
+                finally:
+                    stream.unlink()
+
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertEqual(result["removed"], [resource_id])
+        self.assertEqual(result["blocked"], [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows named stream behavior")
+    def test_windows_named_streams_block_validation_cleanup_without_build_evidence(self):
+        resource_id = "validation-no-build"
+        head = self.finish()
+        tree = self.attempt(resource_id, "validation", head, "independent-validation")
+        self.invoke("finish_worktree_attempt", resource_id=resource_id, report=self.attempt_report(resource_id))
+
+        early_stream = Path(str(tree / "first.txt") + ":unrecorded")
+        early_stream.write_bytes(b"retain before planning")
+        try:
+            with self.assertRaisesRegex(ValueError, "Named Windows data stream retained"):
+                self.cleanup_approval([resource_id])
+            self.assertEqual(early_stream.read_bytes(), b"retain before planning")
+        finally:
+            early_stream.unlink()
+
+        authorized = self.cleanup_approval([resource_id])
+        snapshot = self.read()["cleanup"]["inventory"][0]
+        self.assertNotIn("build_output", snapshot)
+        self.assertNotIn("output_inventory", snapshot)
+        root_stream = Path(str(tree) + ":unrecorded")
+        root_stream.write_bytes(b"retain after planning")
+        try:
+            result = self.invoke("cleanup_apply", authorized=authorized)
+            self.assertEqual(result["removed"], [])
+            self.assertIn("Named Windows data stream retained", result["blocked"][0]["error"])
+            self.assertEqual(root_stream.read_bytes(), b"retain after planning")
+        finally:
+            root_stream.unlink()
+
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertEqual(result["removed"], [resource_id])
+        self.assertEqual(result["blocked"], [])
+        self.assertEqual(self.read()["cleanup"]["inventory"], [snapshot])
+
+    @unittest.skipUnless(os.name == "nt", "Windows named stream behavior")
+    def test_windows_unavailable_stream_enumeration_blocks_capture(self):
+        self.finish()
+        resource_id = "task-first"
+        for error in (5, 87):
+            with self.subTest(error=error), patch.object(
+                    workflow, "find_first_stream", return_value=workflow.INVALID_STREAM_HANDLE), patch.object(
+                    workflow.ctypes, "get_last_error", return_value=error):
+                with self.assertRaisesRegex(ValueError, "Cannot verify Windows data streams"):
+                    self.build_output(resource_id, ["generated"], "raise SystemExit('must not run')")
+        self.assertNotIn("build_output", self.read()["resources"][resource_id])
 
     def test_incremental_squash_cleanup_is_recoverable_and_repeatable(self):
         self.finish()
