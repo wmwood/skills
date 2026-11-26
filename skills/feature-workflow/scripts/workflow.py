@@ -1299,8 +1299,41 @@ class Workspace:
         self.remove_cleanup_branch(snapshot, item, recovery)
 
     def cleanup_branch_in_use(self, ref):
-        listing = git(self.state["repo"], "worktree", "list", "--porcelain", "-z", raw=True)
-        return "branch " + ref in listing.split("\0")
+        repo = self.state["repo"]
+        listing = git(repo, "worktree", "list", "--porcelain", "-z", raw=True)
+        attached = {field.removeprefix("branch ") for field in listing.split("\0")
+                    if field.startswith("branch ")}
+        if ref in attached:
+            return True
+
+        common = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+        try:
+            target = (common / ref).stat()
+        except (FileNotFoundError, NotADirectoryError):
+            # Packed refs and reftable use exact names. After loose-ref removal,
+            # a now-unresolved attachment could have used an alias of that ref.
+            stored = set(git(repo, "for-each-ref", "--format=%(refname)", raw=True).split("\n"))
+            target_parts = (common / ref).resolve().parts
+            for name in attached - stored:
+                path = common / name
+                if path.is_file():
+                    continue
+                parts = path.resolve().parts
+                # ASCII path components differing by more than case prove the
+                # names distinct. Non-ASCII folding depends on the filesystem.
+                if len(parts) == len(target_parts) and all(
+                        a.lower() == b.lower() or not (a.isascii() and b.isascii())
+                        for a, b in zip(parts, target_parts)):
+                    return True
+            return False
+
+        for name in attached:
+            try:
+                if os.path.samestat(target, (common / name).stat()):
+                    return True
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+        return False
 
     def commit_branch_deletion(self, ref, recovery, expected):
         # Prepare locks both refs with exact old OIDs. An uncommitted transaction

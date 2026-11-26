@@ -1256,6 +1256,53 @@ Path("generated/second").write_bytes(b"rebuilt by a recorded build")
         self.assertEqual(self.git(self.repo, "rev-parse", branch),
                          self.git(self.repo, "rev-parse", result["recovery_refs"][0]))
 
+    def test_branch_occupancy_uses_loose_ref_identity(self):
+        checkout = self.path / "case variant checkout"
+        head = self.git(self.repo, "rev-parse", "HEAD")
+        original_branch = "CaseProbe"
+        attached_branch = "caseprobe"
+        self.git(self.repo, "branch", original_branch, head)
+        original_ref = "refs/heads/" + original_branch
+        attached_ref = "refs/heads/" + attached_branch
+        loose_alias = (self.repo / ".git" / attached_ref).exists()
+        if not loose_alias:
+            self.git(self.repo, "branch", attached_branch, head)
+        self.git(self.repo, "worktree", "add", str(checkout), attached_branch)
+        self.assertEqual(self.git(checkout, "symbolic-ref", "HEAD"), attached_ref)
+        self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), head)
+        self.assertTrue(self.invoke("cleanup_branch_in_use", ref=attached_ref))
+        self.assertEqual(self.invoke("cleanup_branch_in_use", ref=original_ref), loose_alias)
+        self.assertFalse(self.invoke("cleanup_branch_in_use", ref=original_ref + "-other"))
+
+    def test_branch_occupancy_with_packed_refs_and_unresolved_attachments(self):
+        self.git(self.repo, "branch", "released")
+        self.git(self.repo, "pack-refs", "--all")
+        self.assertTrue(self.invoke("cleanup_branch_in_use", ref="refs/heads/main"))
+        self.assertFalse(self.invoke("cleanup_branch_in_use", ref="refs/heads/released"))
+
+        checkout = self.path / "unborn checkout"
+        self.git(self.repo, "worktree", "add", "--detach", str(checkout), "HEAD")
+        self.git(checkout, "switch", "--orphan", "Released")
+        self.assertTrue(self.invoke("cleanup_branch_in_use", ref="refs/heads/released"))
+
+    def test_unrelated_unborn_checkout_allows_packed_branch_cleanup(self):
+        self.finish()
+        approved = self.cleanup_approval(["task-first"])
+        task = self.read()["tasks"]["first"]
+        ref = "refs/heads/" + task["branch"]
+        self.git(self.repo, "pack-refs", "--all")
+        checkout = self.path / "unrelated checkout"
+        self.git(self.repo, "worktree", "add", "--detach", str(checkout), "HEAD")
+        self.git(checkout, "switch", "--orphan", "codex/draft-documentation")
+
+        result = self.invoke("cleanup_apply", authorized=approved)
+        self.assertEqual(result["removed"], ["task-first"])
+        self.assertEqual(result["blocked"], [])
+        self.assertIsNone(self.invoke("cleanup_ref_head", ref=ref))
+        self.assertFalse(self.invoke("cleanup_branch_in_use", ref=ref))
+        self.assertEqual(self.git(checkout, "symbolic-ref", "HEAD"), "refs/heads/codex/draft-documentation")
+        self.assertEqual(self.git(self.repo, "rev-parse", result["recovery_refs"][0]), task["head"])
+
     def test_cleanup_rechecks_branch_occupancy_under_the_expected_ref_lock(self):
         self.finish()
         authorized = self.cleanup_approval(["task-first"])
