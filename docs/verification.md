@@ -16,4 +16,4 @@ rtk proxy python "scripts/validate_library.py" || exit 1
 rtk proxy python -m unittest discover -s "tests" -v || exit 1
 ```
 
-Tests cover exact inventory authorization, squash source preservation, interrupted/repeated cleanup, dirty and ignored files, changed branches, paths with spaces, merge-gated feature removal and shared Docker ownership. Record unavailable platforms and privilege-dependent skips in the delivery report. Keep completed feature verification results in Git history and PR evidence; this document contains reusable development conventions only.
+Tests cover exact and replacement inventory authorization, gate and review attempt evidence, build-output attribution, native Windows named streams, interruption during file, worktree or branch removal, recovery refs, merge-gated feature removal, and shared Docker ownership. Record unavailable platforms and privilege-dependent skips in the delivery report. Keep completed feature verification results in Git history and PR evidence; this document contains reusable development conventions only.

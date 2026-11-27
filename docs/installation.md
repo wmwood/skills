@@ -36,7 +36,7 @@ For project installation, use an absolute destination ending in the existing pro
 3. Approve the exact scope before Planner produces tasks. Valid approved scope is reused without a redundant interview or approval unless it changes. Planning does not authorize implementation dispatch.
 4. Invoke $feature-orchestrator to execute the approved plan with independent implementers/reviewers, serial integration and exact-HEAD validation/quality gates. Draft PR publication also requires publishing authorization; agents never approve or merge it.
 5. Return PR feedback to Orchestrator for scoped fixes, reviewed integration and renewed gates. Product changes require an approved consolidated specification revision.
-6. For cleanup, inspect and explicitly authorize the concrete inventory digest. Task/review resources may be released after reviewed integration; feature worktree/branch removal additionally requires verified PR merge.
+6. For cleanup, inspect the registered resources, any verified build output and the concrete inventory digest before approving it. The [cleanup protocol](../skills/feature-workflow/references/cleanup.md) covers completed worktree attempts, interrupted removal, and separate approval for a changed inventory. Feature worktree and branch removal still requires verified PR merge.
 
 These are chat instructions, not shell commands. Product approval is separate from agent mode and execution authorization. In read-only environments prepare reviewable artifacts and defer mutations. Missing independent agents blocks dispatch rather than permitting self-review.
 

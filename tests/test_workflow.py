@@ -1,4 +1,5 @@
 """Integration tests use disposable local Git repositories; no network or live checkout edits."""
+import hashlib
 import importlib.util
 import json
 import os
@@ -510,6 +511,934 @@ class WorkflowTests(unittest.TestCase):
         plan = self.invoke("cleanup_plan", resource_ids=ids)
         return dict(self.approved, feature_id="sample", inventory_sha256=plan["inventory_sha256"])
 
+    def attempt(self, resource_id, purpose, head, owner, task_id=None):
+        folder = "reviews" if purpose == "review" else "gates"
+        tree = self.path / folder / resource_id
+        branch = "codex/sample-" + resource_id
+        self.git(self.repo, "worktree", "add", "-b", branch, str(tree), head)
+        self.invoke("register_resource", resource_id=resource_id, kind="worktree",
+                    owner=owner, purpose=purpose, path=str(tree), branch=branch,
+                    task_id=task_id, track_attempt=purpose == "review")
+        return tree
+
+    def attempt_report(self, resource_id, **changes):
+        attempt = self.read()["resources"][resource_id]["attempt"]
+        report = dict(resource_id=resource_id, agent=attempt["owner"], head=attempt["head"],
+                      spec_revision=attempt["spec_revision"])
+        if attempt["purpose"] == "review":
+            report.update(task_id=attempt["task_id"], verdict="fail", tests=["Checks completed"], findings=[])
+        else:
+            report.update(kind=attempt["purpose"], passed=False, evidence=["Checks completed"])
+        report.update(changes)
+        return report
+
+    def test_cleanup_accepts_failed_and_superseded_gate_worktrees_without_passing_gates(self):
+        head = self.finish()
+        for kind in ("validation", "quality"):
+            resource = kind + "-one"
+            self.attempt(resource, kind, head, "independent-" + kind)
+            report = self.attempt_report(resource, passed=kind == "validation")
+            self.invoke("finish_worktree_attempt", resource_id=resource, report=report)
+            self.gate(kind, passed=False)
+        self.specification.write_text("AC1: revised outputs exist.\n", encoding="utf-8")
+        self.invoke("revise", spec=str(self.specification), approved=self.approved, affected_tasks=[])
+        with self.assertRaisesRegex(ValueError, "Missing/stale validation gate"):
+            self.invoke("pr_ready")
+        authorized = self.cleanup_approval(["validation-one", "quality-one"])
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertEqual(set(result["removed"]), {"validation-one", "quality-one"})
+        self.assertEqual(result["blocked"], [])
+        self.assertEqual(self.read()["gates"], {})
+        for resource in ("validation-one", "quality-one"):
+            record = self.read()["resources"][resource]["attempt"]["report"]
+            self.assertTrue((self.path / "reports" / record["file"]).is_file())
+            self.assertEqual(self.git(self.repo, "rev-parse", "refs/feature-workflow/sample/" + resource), head)
+
+    def test_tracked_review_blocks_new_and_persisted_legacy_path_aliases(self):
+        self.add()
+        self.implement()
+        source = self.read()["tasks"]["first"]["head"]
+        resource_id = "tracked-review"
+        tree = self.attempt(resource_id, "review", source, "tracked-reviewer", task_id="first")
+        alias = dict(resource_id="legacy-alias", kind="worktree", owner="reviewer-first",
+                     purpose="review", path=str(tree), branch="codex/sample-tracked-review", task_id="first")
+        with self.assertRaisesRegex(ValueError, "overlaps a registered resource"):
+            self.invoke("register_resource", **alias)
+
+        self.review()
+        self.invoke("integrate", task_id="first", message="Add the reviewed first output")
+        state = self.read()
+        tracked = state["resources"].pop(resource_id)
+        workflow.atomic_json(self.path / "state.json", state)
+        self.invoke("register_resource", **alias)
+        authorized = self.cleanup_approval(["legacy-alias"])
+        # A previously persisted conflicting record cannot bypass attempt verification.
+        state = self.read()
+        state["resources"][resource_id] = tracked
+        workflow.atomic_json(self.path / "state.json", state)
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("overlaps a registered resource", result["blocked"][0]["error"])
+        self.assertTrue(tree.is_dir())
+        self.assertEqual(self.git(self.repo, "rev-parse", "refs/heads/" + alias["branch"]), source)
+
+    def test_gate_worktree_rejects_foreign_repository_at_same_branch_and_head(self):
+        head = self.finish()
+        resource = "quality-foreign"
+        branch = "codex/sample-quality-foreign"
+        tree = self.attempt(resource, "quality", head, "independent-quality")
+        self.invoke("finish_worktree_attempt", resource_id=resource, report=self.attempt_report(resource))
+        tree.rename(tree.with_name("displaced-checkout"))
+        tree.mkdir()
+        self.git(tree, "init", "-b", branch)
+        alternates = tree / ".git/objects/info/alternates"
+        alternates.write_text((self.repo / ".git/objects").as_posix() + "\n", encoding="utf-8", newline="\n")
+        self.git(tree, "update-ref", "refs/heads/" + branch, head)
+        self.git(tree, "read-tree", "--reset", "-u", "HEAD")
+        self.assertEqual(self.git(tree, "rev-parse", "HEAD"), head)
+        with self.assertRaisesRegex(ValueError, "repository mismatch"):
+            self.cleanup_approval([resource])
+
+    def test_gate_worktree_cleanup_requires_registered_matching_finished_attempt(self):
+        head = self.finish()
+        resource = "quality-one"
+        tree = self.attempt(resource, "quality", head, "independent-quality")
+        self.gate("quality")
+        with self.assertRaisesRegex(ValueError, "completed worktree attempt"):
+            self.cleanup_approval([resource])
+        report = self.attempt_report(resource)
+        for field, value in (("agent", "unrelated"), ("head", "0" * 40), ("spec_revision", 2),
+                             ("kind", "validation"), ("resource_id", "another-attempt")):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "attempt"):
+                self.invoke("finish_worktree_attempt", resource_id=resource, report=dict(report, **{field: value}))
+        self.invoke("finish_worktree_attempt", resource_id=resource, report=report)
+        authorized = self.cleanup_approval([resource])
+        path = self.path / "reports" / self.read()["resources"][resource]["attempt"]["report"]["file"]
+        saved = path.read_bytes()
+        path.unlink()
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("Missing preserved", result["blocked"][0]["error"])
+        path.write_bytes(saved + b" ")
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("report changed", result["blocked"][0]["error"])
+        path.write_bytes(saved)
+        self.git(tree, "commit", "--allow-empty", "-m", "Advance the gate checkout after approval")
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("attempt identity changed", result["blocked"][0]["error"])
+        self.git(tree, "update-ref", "refs/heads/codex/sample-quality-one", head)
+        self.git(tree, "checkout", "-b", "unrelated-worktree-branch")
+        self.assertTrue(self.invoke("cleanup_apply", authorized=authorized)["blocked"])
+        self.git(tree, "checkout", "codex/sample-quality-one")
+        self.assertFalse(self.invoke("cleanup_apply", authorized=authorized)["blocked"])
+
+    def test_superseded_review_cleanup_preserves_the_old_unintegrated_tip(self):
+        self.add()
+        task_tree = self.implement()
+        source = self.read()["tasks"]["first"]["head"]
+        old = "first-review-old"
+        old_tree = self.attempt(old, "review", source, "reviewer-old", task_id="first")
+        report = self.attempt_report(old)
+        with self.assertRaisesRegex(ValueError, "review attempt"):
+            self.invoke("finish_worktree_attempt", resource_id=old, report=dict(report, task_id="another"))
+        self.invoke("finish_worktree_attempt", resource_id=old, report=report)
+        self.invoke("review", task_id="first", report=report)
+        with self.assertRaisesRegex(ValueError, "Unintegrated"):
+            self.cleanup_approval([old])
+        (task_tree / "first.txt").write_text("review repair\n", encoding="utf-8")
+        self.git(task_tree, "add", "first.txt")
+        self.git(task_tree, "commit", "-m", "Revise first output after review")
+        self.invoke("submit", task_id="first")
+        final = self.read()["tasks"]["first"]["head"]
+        final_id = "first-review-final"
+        self.attempt(final_id, "review", final, "reviewer-final", task_id="first")
+        accepted = self.attempt_report(final_id, verdict="pass")
+        self.invoke("finish_worktree_attempt", resource_id=final_id, report=accepted)
+        self.invoke("review", task_id="first", report=accepted)
+        self.invoke("integrate", task_id="first", message="Add the reviewed first output")
+
+        authorized = self.cleanup_approval([old, final_id, "task-first"])
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertEqual(result["blocked"], [])
+        self.assertFalse(old_tree.exists())
+        self.assertEqual(self.git(self.repo, "rev-parse", "refs/feature-workflow/sample/" + old), source)
+        self.assertEqual(self.git(self.repo, "rev-parse", "refs/feature-workflow/sample/" + final_id), final)
+
+    def test_review_finished_after_integration_lacks_proof_of_supersession(self):
+        self.add()
+        self.implement()
+        source = self.read()["tasks"]["first"]["head"]
+        resource = "first-review-open"
+        self.attempt(resource, "review", source, "reviewer-open", task_id="first")
+        self.review()
+        self.invoke("integrate", task_id="first", message="Add the reviewed first output")
+        with self.assertRaisesRegex(ValueError, "completed worktree attempt"):
+            self.cleanup_approval([resource])
+        self.invoke("finish_worktree_attempt", resource_id=resource, report=self.attempt_report(resource))
+        with self.assertRaisesRegex(ValueError, "No later review"):
+            self.cleanup_approval([resource])
+
+    def test_pending_legacy_review_inventory_resumes_with_a_distinct_resource_owner(self):
+        self.finish()
+        state = self.read()
+        task = state["tasks"]["first"]
+        task.pop("review_evidence")
+        head = task["head"]
+        resource_id = "legacy-final"
+        tree = self.path / "reviews" / resource_id
+        branch = "codex/sample-legacy-final"
+        self.git(self.repo, "worktree", "add", "-b", branch, str(tree), head)
+
+        # Reconstruct the persisted schema-2 inventory from before attempt tracking.
+        resource = dict(kind="worktree", owner="review-worktree-coordinator", purpose="review",
+                        path=str(tree), branch=branch, task_id="first", docker_id=None, status="present")
+        self.assertNotEqual(resource["owner"], task["review"]["agent"])
+        state["resources"][resource_id] = resource
+        inventory = [dict(resource_id=resource_id, head=head, **resource)]
+        token = hashlib.sha256(json.dumps(inventory, sort_keys=True).encode()).hexdigest()
+        state["cleanup"] = dict(inventory=inventory, inventory_sha256=token,
+                                items=[dict(resource_id=resource_id, status="pending")])
+        authorized = dict(self.approved, feature_id="sample", inventory_sha256=token)
+        state["cleanup_authorization"] = authorized
+        workflow.atomic_json(self.path / "state.json", state)
+
+        private = tree / "private.txt"
+        private.write_text("retain until explicitly removed", encoding="utf-8")
+        blocked = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("Dirty/ignored", blocked["blocked"][0]["error"])
+        private.unlink()
+        if os.name == "nt":
+            stream = Path(str(tree / "first.txt") + ":unrecorded")
+            stream.write_bytes(b"retain legacy checkout data")
+            try:
+                blocked = self.invoke("cleanup_apply", authorized=authorized)
+                self.assertIn("Named Windows data stream retained", blocked["blocked"][0]["error"])
+                self.assertEqual(stream.read_bytes(), b"retain legacy checkout data")
+            finally:
+                stream.unlink()
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertEqual(result["removed"], [resource_id])
+        self.assertEqual(result["blocked"], [])
+        self.assertEqual(self.read()["cleanup"]["inventory"], inventory)
+        self.assertEqual(self.git(self.repo, "rev-parse", "refs/feature-workflow/sample/" + resource_id), head)
+
+    def build_output(self, resource_id, directories, source):
+        return self.invoke("record_build_output", resource_id=resource_id, directories=directories,
+                           command=[sys.executable, "-c", "from pathlib import Path\n" + source])
+
+    def test_build_output_inventory_records_exact_ignored_and_untracked_contents(self):
+        head = self.finish()
+        resource_id = "validation-build"
+        tree = self.attempt(resource_id, "validation", head, "independent-validation")
+        exclude = self.repo / ".git/info/exclude"
+        exclude.write_text("ignored output/\n", encoding="utf-8")
+        reference = self.build_output(resource_id, ["plain output", "ignored output"], """
+Path("plain output").mkdir()
+Path("plain output/file with spaces").write_bytes(b"plain")
+Path("ignored output/nested/empty").mkdir(parents=True)
+Path("ignored output/nested/result").write_bytes(b"ignored")
+""")
+        with self.assertRaisesRegex(ValueError, "completed worktree attempt"):
+            self.cleanup_approval([resource_id])
+        self.invoke("finish_worktree_attempt", resource_id=resource_id, report=self.attempt_report(resource_id))
+        report_path = self.path / "reports" / reference["file"]
+        self.assertEqual(workflow.digest(report_path), reference["sha256"])
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["worktree"]["head"], head)
+        self.assertEqual(report["worktree"]["path"], str(tree))
+        self.assertEqual(report["worktree"]["resource_id"], resource_id)
+        self.assertEqual(report["before"], {})
+        self.assertEqual(report["exit_code"], 0)
+
+        authorized = self.cleanup_approval([resource_id])
+        snapshot = self.read()["cleanup"]["inventory"][0]
+        self.assertEqual(snapshot["build_output"]["reports"], [reference])
+        inventory = snapshot["output_inventory"]
+        self.assertEqual(inventory["directories"], ["ignored output", "plain output"])
+        self.assertEqual(inventory["entries"], report["after"])
+        self.assertEqual(inventory["generated"], [
+            "ignored output", "ignored output/nested", "ignored output/nested/empty",
+            "ignored output/nested/result", "plain output", "plain output/file with spaces",
+        ])
+        file_proof = inventory["entries"]["ignored output/nested/result"]
+        self.assertEqual(file_proof["size"], len(b"ignored"))
+        self.assertEqual(file_proof["sha256"], hashlib.sha256(b"ignored").hexdigest())
+        self.assertEqual(inventory["entries"]["ignored output/nested/empty"]["kind"], "directory")
+
+    def test_build_output_carries_only_verified_files_across_builds(self):
+        self.finish()
+        resource_id = "task-first"
+        root = self.path / "tasks/first"
+        self.build_output(resource_id, ["generated"], """
+Path("generated").mkdir()
+Path("generated/verified").write_bytes(b"first")
+""")
+        self.build_output(resource_id, ["generated"], """
+Path("generated/verified").rename("generated/moved verified")
+Path("generated/verified").write_bytes(b"rebuilt")
+Path("generated/second").write_bytes(b"second")
+""")
+        with workflow.Workspace(self.path, "coordinator-session", "orchestrator").transaction() as workspace:
+            resource = workspace.state["resources"][resource_id]
+            output = workspace.inspect_resource(resource)["output_inventory"]
+        self.assertEqual(output["generated"], [
+            "generated", "generated/moved verified", "generated/second", "generated/verified",
+        ])
+        self.assertEqual(output["entries"]["generated/moved verified"]["sha256"], hashlib.sha256(b"first").hexdigest())
+        self.assertEqual(output["entries"]["generated/verified"]["sha256"], hashlib.sha256(b"rebuilt").hexdigest())
+
+        unknown = root / "generated/private"
+        unknown.write_bytes(b"private before a later build")
+        for _ in range(2):
+            self.build_output(resource_id, ["generated"], """
+Path("generated/private").write_bytes(b"overwritten but not attributable")
+Path("generated/verified").write_bytes(b"rebuilt")
+""")
+            with self.assertRaisesRegex(ValueError, "Unknown files retained inside"):
+                self.cleanup_approval([resource_id])
+        self.assertTrue(unknown.exists())
+        self.build_output(resource_id, ["generated"], """
+Path("generated/private").rename("generated/renamed private")
+""")
+        with self.assertRaisesRegex(ValueError, "Unknown files retained inside"):
+            self.cleanup_approval([resource_id])
+        self.build_output(resource_id, ["generated"], """
+Path("generated/renamed private").unlink()
+Path("generated/renamed private").write_bytes(b"new inode, same unknown path")
+""")
+        with self.assertRaisesRegex(ValueError, "Unknown files retained inside"):
+            self.cleanup_approval([resource_id])
+
+    def test_build_output_blocks_unknown_changed_or_replaced_output(self):
+        self.finish()
+        resource_id = "task-first"
+        tree = self.path / "tasks/first"
+        result = tree / "generated/result"
+        self.build_output(resource_id, ["generated"], """
+Path("generated").mkdir()
+Path("generated/result").write_bytes(b"original")
+""")
+
+        exclude = self.repo / ".git/info/exclude"
+        exclude.write_text("outside ignored\n", encoding="utf-8")
+        outside = tree / "outside ignored"
+        outside.write_bytes(b"keep")
+        with self.assertRaisesRegex(ValueError, "Unverified untracked or ignored files"):
+            self.cleanup_approval([resource_id])
+        outside.unlink()
+
+        nested = tree / "generated/manual addition"
+        nested.mkdir()
+        (nested / "private").write_bytes(b"keep")
+        with self.assertRaisesRegex(ValueError, "Build output contents changed"):
+            self.cleanup_approval([resource_id])
+        (nested / "private").unlink()
+        nested.rmdir()
+
+        for name in ("outside untracked", "outside ignored"):
+            with self.subTest(outside=name):
+                untouched = tree / name
+                untouched.write_bytes(b"may not move unverified contents into the recorded root")
+                with self.assertRaisesRegex(ValueError, "Unverified untracked or ignored"):
+                    self.build_output(resource_id, ["generated"], f"""
+Path({name!r}).rename("generated/moved outside file")
+""")
+                self.assertTrue(untouched.is_file())
+                self.assertFalse((tree / "generated/moved outside file").exists())
+                untouched.unlink()
+
+        saved = self.root / "original output file"
+        result.rename(saved)
+        result.write_bytes(saved.read_bytes())
+        with self.assertRaisesRegex(ValueError, "Build output contents changed"):
+            self.cleanup_approval([resource_id])
+
+    def test_build_output_rejects_failed_builds_tracked_edits_and_unsafe_paths(self):
+        self.finish()
+        resource_id = "task-first"
+        tree = self.path / "tasks/first"
+        build = dict(resource_id=resource_id, directories=["generated"],
+                     command=[sys.executable, "-c", """
+from pathlib import Path
+Path("generated").mkdir()
+Path("generated/leftover").write_bytes(b"unverified")
+raise SystemExit(17)
+"""])
+        with self.assertRaisesRegex(ValueError, "Operation requires role"):
+            self.invoke("record_build_output", role="planner", **build)
+        with self.assertRaisesRegex(ValueError, "Build command failed with exit code 17"):
+            self.invoke("record_build_output", **build)
+        self.assertNotIn("build_output", self.read()["resources"][resource_id])
+        self.assertFalse(list((self.path / "reports").glob("build-output-*")))
+        with self.assertRaisesRegex(ValueError, "Dirty/ignored"):
+            self.cleanup_approval([resource_id])
+
+        for directories in (["../escape"], [str(tree / "generated")], [".git"],
+                            ["generated", "generated/nested"], ["generated", "generated"]):
+            with self.subTest(directories=directories), self.assertRaisesRegex(
+                    ValueError, "Unsafe output directory|Output directories must be distinct"):
+                self.build_output(resource_id, directories, "raise SystemExit('must not run')")
+        with self.assertRaisesRegex(ValueError, "Output directory overlaps a tracked"):
+            self.build_output(resource_id, ["tracked.txt"], "raise SystemExit('must not run')")
+
+        (tree / "tracked.txt").write_bytes(b"modified")
+        with self.assertRaisesRegex(ValueError, "Tracked or staged"):
+            self.build_output(resource_id, ["generated"], "raise SystemExit('must not run')")
+        self.git(tree, "add", "--", "tracked.txt")
+        with self.assertRaisesRegex(ValueError, "Tracked or staged"):
+            self.build_output(resource_id, ["generated"], "raise SystemExit('must not run')")
+        self.git(tree, "restore", "--source=HEAD", "--staged", "--worktree", "--", "tracked.txt")
+
+        self.git(tree, "update-index", "--assume-unchanged", "--", "tracked.txt")
+        (tree / "tracked.txt").write_bytes(b"hidden tracked edit")
+        with self.assertRaisesRegex(ValueError, "Index flags can conceal"):
+            self.build_output(resource_id, ["generated"], "raise SystemExit('must not run')")
+
+    def test_build_output_rejects_links_within_declared_directories(self):
+        self.finish()
+        resource_id = "task-first"
+        tree = self.path / "tasks/first"
+        preserve = self.root / "untouched outside"
+        preserve.write_bytes(b"outside")
+        with self.assertRaisesRegex(ValueError, "linked output file"):
+            self.build_output(resource_id, ["generated"], f"""
+import os
+Path("generated").mkdir()
+os.link({str(preserve)!r}, "generated/hard link")
+""")
+        self.assertEqual(preserve.read_bytes(), b"outside")
+        self.assertNotIn("build_output", self.read()["resources"][resource_id])
+
+        (tree / "generated/hard link").unlink()
+        if os.name == "nt":
+            subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", "linked-root", str(self.root)],
+                           cwd=tree, capture_output=True, check=True)
+            self.addCleanup(lambda: (tree / "linked-root").rmdir())
+        else:
+            (tree / "linked-root").symlink_to(self.root, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "Unsafe cleanup path|Linked cleanup path"):
+            self.build_output(resource_id, ["linked-root"], "raise SystemExit('must not run')")
+
+    def test_build_output_requires_durable_evidence_and_same_checkout_head(self):
+        head = self.finish()
+        resource_id = "validation-build"
+        tree = self.attempt(resource_id, "validation", head, "independent-validation")
+        reference = self.build_output(resource_id, ["generated"], """
+Path("generated").mkdir()
+Path("generated/result").write_bytes(b"verified")
+""")
+        self.invoke("finish_worktree_attempt", resource_id=resource_id, report=self.attempt_report(resource_id))
+        path = self.path / "reports" / reference["file"]
+        saved = path.read_bytes()
+        path.write_bytes(saved + b" ")
+        with self.assertRaisesRegex(ValueError, "report changed"):
+            self.cleanup_approval([resource_id])
+        path.unlink()
+        with self.assertRaisesRegex(ValueError, "Missing preserved"):
+            self.cleanup_approval([resource_id])
+        path.write_bytes(saved)
+        self.git(tree, "commit", "--allow-empty", "-m", "Move validation checkout beyond the recorded build")
+        with self.assertRaisesRegex(ValueError, "Build evidence does not match"):
+            self.cleanup_approval([resource_id])
+
+    @unittest.skipUnless(os.name == "nt", "Windows named stream behavior")
+    def test_windows_named_streams_block_directory_and_file_output(self):
+        self.finish()
+        resource_id = "task-first"
+        tree = self.path / "tasks/first"
+        self.build_output(resource_id, ["generated"], """
+Path("generated").mkdir()
+Path("generated/result").write_bytes(b"verified default stream")
+""")
+        for relative in ("generated", "generated/result"):
+            with self.subTest(path=relative):
+                stream = Path(str(tree / relative) + ":unrecorded")
+                stream.write_bytes(b"preserve separately authored data")
+                try:
+                    with self.assertRaisesRegex(ValueError, "Named Windows data stream retained"):
+                        self.cleanup_approval([resource_id])
+                    with self.assertRaisesRegex(ValueError, "Named Windows data stream retained"):
+                        self.build_output(resource_id, ["generated"], "raise SystemExit('must not run')")
+                    self.assertEqual(stream.read_bytes(), b"preserve separately authored data")
+                finally:
+                    stream.unlink()
+
+        with self.assertRaisesRegex(ValueError, "Named Windows data stream retained"):
+            self.build_output(resource_id, ["generated"], """
+Path("generated/result:added by build").write_bytes(b"not inventoried")
+""")
+        self.assertEqual(len(self.read()["resources"][resource_id]["build_output"]["reports"]), 1)
+
+    @unittest.skipUnless(os.name == "nt", "Windows named stream behavior")
+    def test_windows_named_streams_block_approved_empty_output_cleanup(self):
+        self.finish()
+        resource_id = "task-first"
+        tree = self.path / "tasks/first"
+        (tree / "outside empty").mkdir()
+        self.build_output(resource_id, ["generated"], "pass")
+        authorized = self.cleanup_approval([resource_id])
+        self.assertEqual(self.read()["cleanup"]["inventory"][0]["output_inventory"]["entries"], {})
+
+        for entry in (tree, tree / "tracked.txt", tree / "outside empty", tree / ".git"):
+            with self.subTest(path=entry.name):
+                stream = Path(str(entry) + ":unrecorded")
+                stream.write_bytes(b"retain")
+                try:
+                    result = self.invoke("cleanup_apply", authorized=authorized)
+                    self.assertEqual(result["removed"], [])
+                    self.assertIn("Named Windows data stream retained", result["blocked"][0]["error"])
+                    self.assertEqual(stream.read_bytes(), b"retain")
+                finally:
+                    stream.unlink()
+
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertEqual(result["removed"], [resource_id])
+        self.assertEqual(result["blocked"], [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows named stream behavior")
+    def test_windows_named_streams_block_validation_cleanup_without_build_evidence(self):
+        resource_id = "validation-no-build"
+        head = self.finish()
+        tree = self.attempt(resource_id, "validation", head, "independent-validation")
+        self.invoke("finish_worktree_attempt", resource_id=resource_id, report=self.attempt_report(resource_id))
+
+        early_stream = Path(str(tree / "first.txt") + ":unrecorded")
+        early_stream.write_bytes(b"retain before planning")
+        try:
+            with self.assertRaisesRegex(ValueError, "Named Windows data stream retained"):
+                self.cleanup_approval([resource_id])
+            self.assertEqual(early_stream.read_bytes(), b"retain before planning")
+        finally:
+            early_stream.unlink()
+
+        authorized = self.cleanup_approval([resource_id])
+        snapshot = self.read()["cleanup"]["inventory"][0]
+        self.assertNotIn("build_output", snapshot)
+        self.assertNotIn("output_inventory", snapshot)
+        root_stream = Path(str(tree) + ":unrecorded")
+        root_stream.write_bytes(b"retain after planning")
+        try:
+            result = self.invoke("cleanup_apply", authorized=authorized)
+            self.assertEqual(result["removed"], [])
+            self.assertIn("Named Windows data stream retained", result["blocked"][0]["error"])
+            self.assertEqual(root_stream.read_bytes(), b"retain after planning")
+        finally:
+            root_stream.unlink()
+
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertEqual(result["removed"], [resource_id])
+        self.assertEqual(result["blocked"], [])
+        self.assertEqual(self.read()["cleanup"]["inventory"], [snapshot])
+
+    @unittest.skipUnless(os.name == "nt", "Windows named stream behavior")
+    def test_windows_unavailable_stream_enumeration_blocks_capture(self):
+        self.finish()
+        resource_id = "task-first"
+        for error in (5, 87):
+            with self.subTest(error=error), patch.object(
+                    workflow, "find_first_stream", return_value=workflow.INVALID_STREAM_HANDLE), patch.object(
+                    workflow.ctypes, "get_last_error", return_value=error):
+                with self.assertRaisesRegex(ValueError, "Cannot verify Windows data streams"):
+                    self.build_output(resource_id, ["generated"], "raise SystemExit('must not run')")
+        self.assertNotIn("build_output", self.read()["resources"][resource_id])
+
+    def create_output_cleanup(self):
+        self.finish()
+        tree = self.path / "tasks/first"
+        self.build_output("task-first", ["generated"], """
+Path("generated/nested empty").mkdir(parents=True)
+Path("generated/first").write_bytes(b"first")
+Path("generated/second").write_bytes(b"second")
+""")
+        return tree, self.cleanup_approval(["task-first"])
+
+    def test_verified_output_cleanup_rechecks_and_removes_approved_entries(self):
+        tree, authorized = self.create_output_cleanup()
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertEqual(result["blocked"], [])
+        self.assertEqual(result["removed"], ["task-first"])
+        self.assertFalse(tree.exists())
+        state = self.read()
+        item = state["cleanup"]["items"][0]
+        self.assertEqual(item["removed_output"], [
+            "generated/first", "generated/nested empty", "generated/second", "generated",
+        ])
+        self.assertEqual(state["cleanup"]["inventory"][0]["head"],
+                         self.git(self.repo, "rev-parse", result["recovery_refs"][0]))
+
+    def test_verified_output_resume_after_unlink_preserves_existing_approval(self):
+        tree, authorized = self.create_output_cleanup()
+        original = workflow.Workspace.remove_output_entry
+
+        def interrupt_after_unlink(workspace, path, output, name, quarantine=None):
+            original(workspace, path, output, name, quarantine)
+            raise OSError("interrupted after deleting one approved path")
+
+        with patch.object(workflow.Workspace, "remove_output_entry", interrupt_after_unlink):
+            result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertEqual(result["blocked"][0]["error"], "interrupted after deleting one approved path")
+        self.assertEqual(result["recovery_refs"], ["refs/feature-workflow/sample/task-first"])
+        self.assertFalse((tree / "generated/first").exists())
+        self.assertEqual(self.read()["cleanup"]["items"][0]["removing_output"], "generated/first")
+        self.assertTrue((tree / "generated/second").exists())
+
+        # Recreating a removed file, even with matching bytes, cannot acquire the approval.
+        restored = tree / "generated/first"
+        restored.write_bytes(b"first")
+        blocked = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("Build output contents changed", blocked["blocked"][0]["error"])
+        self.assertTrue(restored.exists())
+        restored.unlink()
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertEqual(result["removed"], ["task-first"])
+        self.assertEqual(result["blocked"], [])
+
+    def test_verified_output_rejects_same_bytes_replacement_at_removal_boundary(self):
+        tree, authorized = self.create_output_cleanup()
+        target = tree / "generated/first"
+        original = workflow.Workspace.remove_output_entry
+
+        def substitute(workspace, path, output, name, quarantine=None):
+            # Keep the original alive so the replacement cannot reuse its filesystem ID.
+            target.rename(tree / "generated/moved")
+            target.write_bytes(b"first")
+            original(workspace, path, output, name, quarantine)
+
+        with patch.object(workflow.Workspace, "remove_output_entry", substitute):
+            result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("Build output entry changed", result["blocked"][0]["error"])
+        self.assertEqual(target.read_bytes(), b"first")
+        self.assertEqual((tree / "generated/moved").read_bytes(), b"first")
+
+    def test_verified_output_stops_after_branch_moves_mid_removal(self):
+        tree, authorized = self.create_output_cleanup()
+        state = self.read()
+        expected = state["tasks"]["first"]["head"]
+        branch = "refs/heads/" + state["tasks"]["first"]["branch"]
+        moved_head = state["integrated_head"]
+        original = workflow.Workspace.remove_output_entry
+
+        def move_branch_after_first_output(workspace, path, output, name, quarantine=None):
+            original(workspace, path, output, name, quarantine)
+            self.git(self.repo, "update-ref", branch, moved_head, expected)
+
+        with patch.object(workflow.Workspace, "remove_output_entry", move_branch_after_first_output):
+            result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("branch or HEAD changed", result["blocked"][0]["error"])
+        self.assertFalse((tree / "generated/first").exists())
+        self.assertTrue((tree / "generated/second").exists())
+        self.assertEqual(self.git(self.repo, "rev-parse", branch), moved_head)
+        self.assertEqual(self.git(self.repo, "rev-parse", result["recovery_refs"][0]), expected)
+        self.git(self.repo, "update-ref", branch, expected, moved_head)
+        self.assertEqual(self.invoke("cleanup_apply", authorized=authorized)["removed"], ["task-first"])
+
+    def test_verified_output_cleanup_blocks_unjournaled_missing_entries(self):
+        tree, authorized = self.create_output_cleanup()
+        (tree / "generated/second").unlink()
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("Build output contents changed", result["blocked"][0]["error"])
+        self.assertTrue((tree / "generated/first").exists())
+        self.assertEqual(result["recovery_refs"], [])
+
+    def test_cleanup_inventory_replacement_preserves_prior_approval_and_requires_new_digest(self):
+        tree, authorized = self.create_output_cleanup()
+        self.build_output("task-first", ["generated"], """
+Path("generated/second").write_bytes(b"rebuilt by a recorded build")
+""")
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("Resource inventory changed", result["blocked"][0]["error"])
+        old = self.read()["cleanup"]
+        self.assertEqual((tree / "generated/second").read_bytes(), b"rebuilt by a recorded build")
+        with self.assertRaisesRegex(ValueError, "exact inventory to replace"):
+            self.invoke("cleanup_plan", resource_ids=["task-first"], replaces_inventory_sha256="wrong")
+        plan = self.invoke("cleanup_plan", resource_ids=["task-first"],
+                           replaces_inventory_sha256=authorized["inventory_sha256"])
+        self.assertNotEqual(plan["inventory_sha256"], authorized["inventory_sha256"])
+        archive, = (self.path / "reports").glob("cleanup-inventory-*.json")
+        previous = json.loads(archive.read_text(encoding="utf-8"))
+        self.assertEqual(previous, dict(plan=old, authorization=authorized))
+        with self.assertRaisesRegex(ValueError, "Exact inventory approval"):
+            self.invoke("cleanup_apply", authorized=authorized)
+        self.assertTrue(tree.exists())
+        renewed = dict(authorized, inventory_sha256=plan["inventory_sha256"])
+        self.assertEqual(self.invoke("cleanup_apply", authorized=renewed)["blocked"], [])
+
+    def test_partial_output_cleanup_cannot_discard_journal_or_overwrite_ref(self):
+        tree, authorized = self.create_output_cleanup()
+        ref = "refs/feature-workflow/sample/task-first"
+        old = self.read()
+        wrong_head = old["integrated_head"]
+        expected = old["tasks"]["first"]["head"]
+        self.git(self.repo, "update-ref", ref, wrong_head)
+        blocked = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("Recovery ref does not match", blocked["blocked"][0]["error"])
+        self.assertEqual(self.git(self.repo, "rev-parse", ref), wrong_head)
+        self.assertTrue((tree / "generated/first").exists())
+        self.git(self.repo, "update-ref", "-d", ref, wrong_head)
+
+        with patch.object(workflow.Workspace, "remove_output_entry", side_effect=OSError("blocked output")):
+            self.assertIn("blocked output", self.invoke("cleanup_apply", authorized=authorized)["blocked"][0]["error"])
+        self.assertEqual(self.git(self.repo, "rev-parse", ref), expected)
+        with self.assertRaisesRegex(ValueError, "every partially removed resource"):
+            resource_id = "temporary"
+            directory = self.path / resource_id
+            directory.mkdir()
+            self.invoke("register_resource", resource_id=resource_id, kind="directory", owner="fixture",
+                        purpose="scratch", path=str(directory))
+            self.invoke("cleanup_plan", resource_ids=[resource_id],
+                        replaces_inventory_sha256=authorized["inventory_sha256"])
+        self.git(self.repo, "update-ref", ref, wrong_head, expected)
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("Missing or changed recovery ref", result["blocked"][0]["error"])
+        self.assertTrue((tree / "generated/first").exists())
+        self.assertEqual(self.git(self.repo, "rev-parse", ref), wrong_head)
+
+    def test_inventory_replacement_carries_unchanged_partial_output_journal(self):
+        tree, approved = self.create_output_cleanup()
+        original = workflow.Workspace.remove_output_entry
+
+        def interrupt_after_unlink(workspace, path, output, name, quarantine=None):
+            original(workspace, path, output, name, quarantine)
+            raise OSError("interrupted after deleting one approved path")
+
+        with patch.object(workflow.Workspace, "remove_output_entry", interrupt_after_unlink):
+            self.assertTrue(self.invoke("cleanup_apply", authorized=approved)["blocked"])
+        self.assertFalse((tree / "generated/first").exists())
+        old = self.read()["cleanup"]
+        new_directory = self.path / "additional temporary"
+        new_directory.mkdir()
+        self.invoke("register_resource", resource_id="additional", kind="directory", owner="fixture",
+                    purpose="scratch", path=str(new_directory))
+        renewed = self.invoke("cleanup_plan", resource_ids=["task-first", "additional"],
+                              replaces_inventory_sha256=old["inventory_sha256"])
+        self.assertEqual(renewed["items"][0], old["items"][0])
+        self.assertNotEqual(renewed["inventory_sha256"], approved["inventory_sha256"])
+        with self.assertRaisesRegex(ValueError, "Exact inventory approval"):
+            self.invoke("cleanup_apply", authorized=approved)
+        result = self.invoke("cleanup_apply", authorized=dict(approved, inventory_sha256=renewed["inventory_sha256"]))
+        self.assertEqual(result["removed"], ["task-first", "additional"])
+        self.assertEqual(result["blocked"], [])
+
+    def test_cleanup_resumes_if_git_removed_worktree_before_reporting_failure(self):
+        tree, authorized = self.create_output_cleanup()
+        original_git = workflow.git
+
+        def interrupted(repo, *args, **kwargs):
+            result = original_git(repo, *args, **kwargs)
+            if args[:2] == ("worktree", "remove"):
+                raise OSError("interrupted after worktree removal")
+            return result
+
+        with patch.object(workflow, "git", side_effect=interrupted):
+            result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("interrupted after worktree removal", result["blocked"][0]["error"])
+        self.assertFalse(tree.exists())
+        self.assertTrue(self.read()["cleanup"]["items"][0]["worktree_removing"])
+        self.assertEqual(self.invoke("cleanup_apply", authorized=authorized)["removed"], ["task-first"])
+
+    def test_branch_checked_out_elsewhere_after_worktree_removal_is_retained(self):
+        tree, authorized = self.create_output_cleanup()
+        original_git = workflow.git
+
+        def interrupted(repo, *args, **kwargs):
+            result = original_git(repo, *args, **kwargs)
+            if args[:2] == ("worktree", "remove"):
+                raise OSError("interrupted before branch removal")
+            return result
+
+        with patch.object(workflow, "git", side_effect=interrupted):
+            self.assertTrue(self.invoke("cleanup_apply", authorized=authorized)["blocked"])
+        self.assertFalse(tree.exists())
+        alternate = self.path / "alternate checkout"
+        branch = self.read()["tasks"]["first"]["branch"]
+        self.git(self.repo, "worktree", "add", str(alternate), branch)
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("checked out in another worktree", result["blocked"][0]["error"])
+        self.assertTrue(alternate.exists())
+        self.assertEqual(self.git(self.repo, "rev-parse", branch),
+                         self.git(self.repo, "rev-parse", result["recovery_refs"][0]))
+
+    def test_branch_occupancy_uses_loose_ref_identity(self):
+        checkout = self.path / "case variant checkout"
+        head = self.git(self.repo, "rev-parse", "HEAD")
+        original_branch = "CaseProbe"
+        attached_branch = "caseprobe"
+        self.git(self.repo, "branch", original_branch, head)
+        original_ref = "refs/heads/" + original_branch
+        attached_ref = "refs/heads/" + attached_branch
+        loose_alias = (self.repo / ".git" / attached_ref).exists()
+        if not loose_alias:
+            self.git(self.repo, "branch", attached_branch, head)
+        self.git(self.repo, "worktree", "add", str(checkout), attached_branch)
+        self.assertEqual(self.git(checkout, "symbolic-ref", "HEAD"), attached_ref)
+        self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), head)
+        self.assertTrue(self.invoke("cleanup_branch_in_use", ref=attached_ref))
+        self.assertEqual(self.invoke("cleanup_branch_in_use", ref=original_ref), loose_alias)
+        self.assertFalse(self.invoke("cleanup_branch_in_use", ref=original_ref + "-other"))
+
+    def test_branch_occupancy_with_packed_refs_and_unresolved_attachments(self):
+        self.git(self.repo, "branch", "released")
+        self.git(self.repo, "pack-refs", "--all")
+        self.assertTrue(self.invoke("cleanup_branch_in_use", ref="refs/heads/main"))
+        self.assertFalse(self.invoke("cleanup_branch_in_use", ref="refs/heads/released"))
+
+        checkout = self.path / "unborn checkout"
+        self.git(self.repo, "worktree", "add", "--detach", str(checkout), "HEAD")
+        self.git(checkout, "switch", "--orphan", "Released")
+        self.assertTrue(self.invoke("cleanup_branch_in_use", ref="refs/heads/released"))
+
+    def test_unrelated_unborn_checkout_allows_packed_branch_cleanup(self):
+        self.finish()
+        approved = self.cleanup_approval(["task-first"])
+        task = self.read()["tasks"]["first"]
+        ref = "refs/heads/" + task["branch"]
+        self.git(self.repo, "pack-refs", "--all")
+        checkout = self.path / "unrelated checkout"
+        self.git(self.repo, "worktree", "add", "--detach", str(checkout), "HEAD")
+        self.git(checkout, "switch", "--orphan", "codex/draft-documentation")
+
+        result = self.invoke("cleanup_apply", authorized=approved)
+        self.assertEqual(result["removed"], ["task-first"])
+        self.assertEqual(result["blocked"], [])
+        self.assertIsNone(self.invoke("cleanup_ref_head", ref=ref))
+        self.assertFalse(self.invoke("cleanup_branch_in_use", ref=ref))
+        self.assertEqual(self.git(checkout, "symbolic-ref", "HEAD"), "refs/heads/codex/draft-documentation")
+        self.assertEqual(self.git(self.repo, "rev-parse", result["recovery_refs"][0]), task["head"])
+
+    def test_cleanup_rechecks_branch_occupancy_under_the_expected_ref_lock(self):
+        self.finish()
+        authorized = self.cleanup_approval(["task-first"])
+        tree = self.path / "tasks/first"
+        alternate = self.path / "alternate during first listing"
+        state = self.read()
+        branch = state["tasks"]["first"]["branch"]
+        expected = state["tasks"]["first"]["head"]
+        original = workflow.Workspace.cleanup_branch_in_use
+
+        def attach_after_first_listing(workspace, ref):
+            result = original(workspace, ref)
+            if not tree.exists() and not alternate.exists():
+                self.git(self.repo, "worktree", "add", str(alternate), branch)
+            return result
+
+        with patch.object(workflow.Workspace, "cleanup_branch_in_use", attach_after_first_listing):
+            result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("checked out in another worktree", result["blocked"][0]["error"])
+        self.assertEqual(self.git(alternate, "rev-parse", "HEAD"), expected)
+        self.assertEqual(self.git(self.repo, "rev-parse", branch), expected)
+
+    def test_native_worktree_add_cannot_attach_to_the_locked_branch(self):
+        self.finish()
+        authorized = self.cleanup_approval(["task-first"])
+        alternate = self.path / "alternate during locked listing"
+        state = self.read()
+        branch = state["tasks"]["first"]["branch"]
+        original = workflow.Workspace.cleanup_branch_in_use
+        attempts = []
+
+        def attach_after_locked_listing(workspace, ref):
+            result = original(workspace, ref)
+            if self.read()["cleanup"]["items"][0].get("branch_removing") and not attempts:
+                attempts.append(subprocess.run(["git", "-C", str(self.repo), "worktree", "add", str(alternate), branch],
+                                               text=True, capture_output=True, timeout=15))
+            return result
+
+        with patch.object(workflow.Workspace, "cleanup_branch_in_use", attach_after_locked_listing):
+            result = self.invoke("cleanup_apply", authorized=authorized)
+        attempt, = attempts
+        self.assertNotEqual(attempt.returncode, 0)
+        self.assertIn("cannot lock ref", attempt.stderr)
+        self.assertFalse(alternate.exists())
+        self.assertEqual(result["removed"], ["task-first"])
+
+    def test_branch_attached_after_transaction_commit_is_recovered_on_resume(self):
+        self.finish()
+        authorized = self.cleanup_approval(["task-first"])
+        alternate = self.path / "alternate detached checkout"
+        state = self.read()
+        branch = "refs/heads/" + state["tasks"]["first"]["branch"]
+        expected = state["tasks"]["first"]["head"]
+        self.git(self.repo, "worktree", "add", "--detach", str(alternate), expected)
+        original = workflow.Workspace.commit_branch_deletion
+
+        def interrupt_after_head_attachment(workspace, ref, recovery, expected_head):
+            original(workspace, ref, recovery, expected_head)
+            # Simulate an independent writer attaching HEAD after ref locks were released.
+            self.git(alternate, "symbolic-ref", "HEAD", branch)
+            raise OSError("interrupted after branch transaction commit")
+
+        with patch.object(workflow.Workspace, "commit_branch_deletion", interrupt_after_head_attachment):
+            result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("interrupted after branch transaction commit", result["blocked"][0]["error"])
+        self.assertTrue(alternate.exists())
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("restored its approved tip", result["blocked"][0]["error"])
+        self.assertEqual(self.git(alternate, "rev-parse", "HEAD"), expected)
+        self.assertEqual(self.git(self.repo, "rev-parse", result["recovery_refs"][0]), expected)
+
+    def test_no_build_cleanup_rejects_tracked_changes_hidden_by_index_flags(self):
+        head = self.finish()
+        resource_id = "validation-hidden-tracked"
+        tree = self.attempt(resource_id, "validation", head, "independent-validation")
+        self.invoke("finish_worktree_attempt", resource_id=resource_id, report=self.attempt_report(resource_id))
+        authorized = self.cleanup_approval([resource_id])
+        tracked = tree / "first.txt"
+        original = tracked.read_bytes()
+        for flag in ("assume-unchanged", "skip-worktree"):
+            with self.subTest(flag=flag):
+                self.git(tree, "update-index", "--" + flag, "--", tracked.name)
+                tracked.write_bytes(b"unrecorded local tracked changes")
+                self.assertEqual(self.git(tree, "status", "--porcelain"), "")
+                result = self.invoke("cleanup_apply", authorized=authorized)
+                self.assertIn("Index flags can conceal", result["blocked"][0]["error"])
+                self.assertEqual(tracked.read_bytes(), b"unrecorded local tracked changes")
+                self.assertEqual(result["recovery_refs"], [])
+                tracked.write_bytes(original)
+                self.git(tree, "update-index", "--no-" + flag, "--", tracked.name)
+        self.assertEqual(self.invoke("cleanup_apply", authorized=authorized)["removed"], [resource_id])
+
+    @unittest.skipIf(os.name == "nt", "POSIX dirfd capture requires a native POSIX filesystem")
+    def test_posix_substitution_at_atomic_capture_preserves_unknown_content(self):
+        tree, authorized = self.create_output_cleanup()
+        target = tree / "generated/first"
+        original = self.path / "original still preserved"
+        rename = os.rename
+
+        def substitute_before_rename(src, dst, **kwargs):
+            if src == target.name and dst == "entry" and "src_dir_fd" in kwargs:
+                rename(target, original)
+                target.write_bytes(b"unapproved replacement")
+            return rename(src, dst, **kwargs)
+
+        with patch.object(workflow.os, "rename", side_effect=substitute_before_rename):
+            result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("Unapproved output preserved", result["blocked"][0]["error"])
+        quarantine = Path(result["blocked"][0]["output_quarantine"]["path"])
+        self.assertEqual((quarantine / "entry").read_bytes(), b"unapproved replacement")
+        self.assertEqual(original.read_bytes(), b"first")
+        self.assertTrue((tree / "generated/second").exists())
+        result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertTrue(result["blocked"])
+        self.assertEqual((quarantine / "entry").read_bytes(), b"unapproved replacement")
+
+    @unittest.skipIf(os.name == "nt", "POSIX dirfd capture requires a native POSIX filesystem")
+    def test_posix_verified_capture_resumes_after_interruption_before_unlink(self):
+        tree, authorized = self.create_output_cleanup()
+        rename = os.rename
+
+        def interrupt_after_capture(src, dst, **kwargs):
+            result = rename(src, dst, **kwargs)
+            if src == "first" and dst == "entry" and "src_dir_fd" in kwargs:
+                raise OSError("interrupted after capturing the approved output")
+            return result
+
+        with patch.object(workflow.os, "rename", side_effect=interrupt_after_capture):
+            result = self.invoke("cleanup_apply", authorized=authorized)
+        self.assertIn("interrupted after capturing", result["blocked"][0]["error"])
+        quarantine = Path(result["blocked"][0]["output_quarantine"]["path"])
+        self.assertEqual((quarantine / "entry").read_bytes(), b"first")
+        self.assertFalse((tree / "generated/first").exists())
+        self.assertEqual(self.invoke("cleanup_apply", authorized=authorized)["removed"], ["task-first"])
+        self.assertFalse(quarantine.exists())
+
     def test_incremental_squash_cleanup_is_recoverable_and_repeatable(self):
         self.finish()
         state = self.read()
@@ -547,14 +1476,10 @@ class WorkflowTests(unittest.TestCase):
     def test_interrupted_cleanup_resumes_after_worktree_removal(self):
         self.finish()
         authorized = self.cleanup_approval(["task-first"])
-        original_git = workflow.git
-        def interrupted(repo, *args):
-            if args[:2] == ("update-ref", "-d"):
-                raise OSError("interrupted branch removal")
-            return original_git(repo, *args)
-        with patch.object(workflow, "git", side_effect=interrupted):
+        with patch.object(workflow.Workspace, "commit_branch_deletion",
+                          side_effect=OSError("interrupted branch removal")):
             result = self.invoke("cleanup_apply", authorized=authorized)
-        self.assertTrue(result["blocked"])
+        self.assertIn("interrupted branch removal", result["blocked"][0]["error"])
         self.assertFalse((self.path / "tasks/first").exists())
         state = self.read()
         branch = "refs/heads/" + state["tasks"]["first"]["branch"]

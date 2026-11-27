@@ -16,16 +16,18 @@ The helper derives and validates the new path using the primary checkout and the
 | add-task | planner/orchestrator | task_id, depends_on (IDs already added), scope, acceptance_ids, tests (nonempty argument arrays) |
 | start-task | orchestrator | task_id, owner (unique implementer identity) |
 | submit | orchestrator | task_id; inspect committed worker result first |
-| review | orchestrator | task_id, report (independent reviewer artifact copied without altering verdict) |
+| review | orchestrator | task_id, report (independent reviewer report object, copied without altering verdict) |
 | return-task | orchestrator | task_id, reason (repair evidence); clears current review for an unfinished task, preserves reports |
 | integrate | orchestrator | task_id, message (descriptive subject and optional explanatory body) |
 | recover | orchestrator | no fields; empty object |
 | revise | orchestrator | spec (new full consolidated specification path), approved, affected_tasks (all affected unfinished IDs) |
 | gate | orchestrator | kind (validation/quality), report |
 | pr-ready | orchestrator | no fields; empty object; readiness only, no network call |
-| register-resource | orchestrator | resource_id, kind, owner, purpose. Supply path/branch/task_id for worktrees, path for directories, or docker_id for containers/networks. Task and review worktrees must be direct children of the workspace's tasks and reviews directories, respectively. |
+| register-resource | orchestrator | resource_id, kind, owner, purpose. Supply path/branch/task_id for worktrees, path for directories, or docker_id for containers/networks. Task and review worktrees must be direct children of the workspace's tasks and reviews directories, respectively. Set `track_attempt: true` for review worktrees that should retain attempt evidence. Validation and quality worktrees track attempts automatically. |
 | record-pr | orchestrator | url, head, base, evidence; optional merge_commit after inspecting merged PR service evidence |
-| cleanup-plan | orchestrator | resource_ids; stores concrete inventory and inventory_sha256, no approval or deletion |
+| finish-worktree-attempt | orchestrator | resource_id, report (full attempt report object) |
+| record-build-output | orchestrator | resource_id, directories (worktree-relative output roots), command (trusted synchronous argument array) |
+| cleanup-plan | orchestrator | resource_ids. Optional replaces_inventory_sha256 identifies the exact unfinished inventory to archive and replace. Returns the new inventory and digest for approval. |
 | cleanup-apply | orchestrator | authorized: human, evidence, date, feature_id, inventory_sha256 |
 | cleanup-status | orchestrator | no fields; removed, retained, blocked, preserved evidence and lifecycle |
 
@@ -42,6 +44,12 @@ Task test example (JSON):
 ```
 
 Use repository-specific commands, not this sample by default. Helpers run tests in the feature worktree after preparing the squash and before committing. They reject nonzero results and changed tracked/index/untracked content. Ignored build output is allowed. Checks have a ten-minute timeout each; use a narrower scoped command or manual checkpoint procedure for longer suites. Output is local checkpoint evidence and must be reviewed before sharing for secrets/private data.
+
+## Build output and worktree attempts
+
+Use the actual completed report object for `finish-worktree-attempt`. Include `resource_id`, `agent`, `head`, and `spec_revision`. A review attempt also uses the review report fields and `task_id`. A gate attempt uses `kind`, `passed`, and `evidence`. Record a tracked review attempt before its canonical `review`, or a gate attempt before submitting a current `gate`. A failed or superseded attempt can support cleanup independently of canonical review and gate decisions.
+
+`record-build-output` runs the supplied command in the registered worktree. Use only a trusted build that finishes writing before exit. Supply distinct non-overlapping relative directories and a nonempty argument array. Commands time out after ten minutes. The helper snapshots each declared directory before and after success and preserves the report and digest. Existing unverified data stays protected. See the [cleanup protocol](cleanup.md) for approval, compatibility, and retry behavior.
 
 ## Integration commit messages
 
